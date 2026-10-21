@@ -1,0 +1,4 @@
+.DS_Store
+# Safety net: real task data belongs only in the private repo.
+tasks.json
+uploads/
