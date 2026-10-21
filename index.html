@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Read-only task board for Itay. Task data stays in a private repository.">
+  <meta name="theme-color" content="#f6f7fb">
+  <title>Itay's tasks</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f6f7fb'/%3E%3Crect x='6' y='6' width='8' height='8' rx='2' fill='%230073ea'/%3E%3Crect x='18' y='6' width='8' height='8' rx='2' fill='%2300c875'/%3E%3Crect x='6' y='18' width='8' height='8' rx='2' fill='%23fdab3d'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%23a25ddc'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Noto+Sans+Hebrew:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    try {
+      var params = new URLSearchParams(location.search);
+      var stored = JSON.parse(localStorage.getItem("itay-tasks.ui") || "{}");
+      var theme = params.get("theme") || stored.theme;
+      if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="live" class="sr-only" aria-live="polite"></div>
+  <div id="app">
+    <div class="setup-wrap">
+      <div class="setup-card loading-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Loading…</p>
+      </div>
+    </div>
+  </div>
+  <noscript>
+    <div class="setup-wrap">
+      <div class="setup-card">
+        <h1>JavaScript is required</h1>
+        <p>This board loads tasks in the browser. Enable JavaScript, then refresh.</p>
+      </div>
+    </div>
+  </noscript>
+  <script src="app.js" defer></script>
+</body>
+</html>
