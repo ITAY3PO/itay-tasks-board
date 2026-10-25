@@ -13,16 +13,19 @@
       "project": "Moon Active",
       "waiting_on": null,
       "source": "Fictional standup",
+      "tldr": "Swap the real cactus for cardboard before the tour.",
+      "linear": [{ "id": "DEMO-1687" }],
       "notes": "Demo only. The cactus is fine. This task is overdue on purpose so the red date can be checked.",
       "created": "2026-10-01",
       "updated": "2026-10-18"
     },
     {
       "id": "d02",
-      "title": "Draft a haiku about the printer jam",
+      "title": "Draft a haiku about the printer jam DEMO-2516",
       "status": "in_progress",
       "priority": "high",
-      "due": "2026-10-21",
+      "due": "2026-10-25",
+      "tldr": "Three lines, one jammed printer.",
       "project": "Travel Town",
       "waiting_on": null,
       "source": "Demo seed",
@@ -39,6 +42,7 @@
       "project": "Personal",
       "waiting_on": null,
       "source": "דוגמה בלבד",
+      "tldr": "סיכום קצר לפגישת הקפה.",
       "notes": "זו משימת דמו. הטקסט צריך להופיע מימין לשמאל בתוך ממשק באנגלית.",
       "created": "2026-10-12",
       "updated": "2026-10-20"
@@ -53,6 +57,7 @@
       "waiting_on": null,
       "source": "Example import",
       "notes": "",
+      "linear": [{ "id": "DEMO-89" }],
       "created": "2026-10-10",
       "updated": "2026-10-19"
     },
@@ -91,6 +96,9 @@
       "project": "Moon Active",
       "waiting_on": "Alex Rivera",
       "source": "Demo seed",
+      "tldr": "Blocked on the hard-hat duck sketch.",
+      "linear": [{ "id": "DEMO-77", "url": "https://linear.app/issue/DEMO-77" }],
+      "scheduled": { "start": "2026-10-25T11:30:00+02:00", "end": "2026-10-25T12:00:00+02:00" },
       "notes": "Alex has the sketch of the duck wearing a tiny hard hat.",
       "created": "2026-10-08",
       "updated": "2026-10-20"
@@ -116,7 +124,7 @@
       "due": "2026-10-20",
       "project": "Personal",
       "waiting_on": "Riley Cho",
-      "source": "Fictional standup",
+      "source": "Fictional standup DEMO-440",
       "notes": "Overdue and waiting, so both highlights should show.",
       "created": "2026-10-05",
       "updated": "2026-10-20"
@@ -156,13 +164,91 @@
       "project": "Side Quest",
       "waiting_on": "",
       "source": "Tolerance check",
-      "notes": "Unknown status, priority, project, and due value. The board should stay calm.",
+      "notes": "Unknown status, priority, project, and due value. The board should stay calm. Ticket DEMO-12 is fictional.",
       "created": "2026-10-21",
       "updated": "2026-10-21"
     },
     {
       "id": "d13",
       "title": "Task with missing fields"
+    },
+    {
+      "id": "d14",
+      "title": "Label the spare mugs",
+      "status": "todo",
+      "priority": "low",
+      "due": "2026-11-02",
+      "project": "Personal",
+      "waiting_on": null,
+      "source": "Demo seed",
+      "notes": "Blue tape is fictional. No real inventory.",
+      "created": "2026-10-14",
+      "updated": "2026-10-21"
+    },
+    {
+      "id": "d15",
+      "title": "Sketch a sticker that is not a cactus",
+      "status": "todo",
+      "priority": "low",
+      "due": null,
+      "project": "Moon Active",
+      "waiting_on": null,
+      "source": "Demo seed",
+      "notes": "",
+      "created": "2026-10-16",
+      "updated": "2026-10-21"
+    },
+    {
+      "id": "d16",
+      "title": "Count the blue sticky notes again",
+      "status": "todo",
+      "priority": "low",
+      "due": "2026-11-04",
+      "project": "Travel Town",
+      "waiting_on": null,
+      "source": "Demo seed",
+      "notes": "The first count was also fictional.",
+      "created": "2026-10-17",
+      "updated": "2026-10-21"
+    },
+    {
+      "id": "d17",
+      "title": "File the imaginary receipt",
+      "status": "todo",
+      "priority": "low",
+      "due": null,
+      "project": "UMI",
+      "waiting_on": null,
+      "source": "Example import",
+      "notes": "",
+      "created": "2026-10-18",
+      "updated": "2026-10-21"
+    },
+    {
+      "id": "d18",
+      "title": "Water the cardboard cactus",
+      "status": "todo",
+      "priority": "low",
+      "due": "2026-11-06",
+      "project": "Personal",
+      "waiting_on": null,
+      "source": "Demo seed",
+      "notes": "Cardboard does not need water. This exists so the day can overflow.",
+      "created": "2026-10-19",
+      "updated": "2026-10-21"
+    },
+    {
+      "id": "d19",
+      "title": "Write a one-line retro for the demo",
+      "status": "todo",
+      "priority": "low",
+      "due": null,
+      "project": "Moon Active",
+      "waiting_on": null,
+      "source": "Fictional standup",
+      "notes": "",
+      "created": "2026-10-20",
+      "updated": "2026-10-21"
     }
   ]
 }

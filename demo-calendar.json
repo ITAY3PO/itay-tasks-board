@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-25",
+  "timezone": "Asia/Jerusalem",
+  "workday": { "start": "09:00", "end": "19:00" },
+  "busy": [
+    {
+      "start": "2026-10-25T08:00:00+02:00",
+      "end": "2026-10-25T09:20:00+02:00",
+      "title": "Early cargo that starts before the workday",
+      "status": "tentative"
+    },
+    {
+      "start": "2026-10-25T10:00:00+02:00",
+      "end": "2026-10-25T10:45:00+02:00",
+      "title": "Standup with the cardboard cactus"
+    },
+    {
+      "start": "2026-10-25T13:00:00+02:00",
+      "end": "2026-10-25T14:00:00+02:00",
+      "title": "Fictional design review\n(pending invite)"
+    }
+  ],
+  "updated": "2026-10-25T06:30:00Z"
+}

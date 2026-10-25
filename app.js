@@ -58,6 +58,10 @@ const state = {
   theme: "light",
   collapsed: new Set(["done"]),
   openTaskId: null,
+  agendaOpen: false,
+  agendaText: "",
+  calendar: null,
+  dataVersion: 0,
   returnFocusId: null,
   projectMenuOpen: false,
   forgetArmed: false,
@@ -259,9 +263,52 @@ function priorityMeta(priority) {
 }
 
 function groupMeta(key) {
-  if (state.groupBy === "status") return statusMeta(key);
+  if (currentGroupBy() === "status") return statusMeta(key);
   const bar = paletteColor(key);
   return { label: key, pill: key, bar, title: titleColor(bar) };
+}
+
+function normalizeLinear(value) {
+  if (!Array.isArray(value)) return [];
+  const links = [];
+  value.forEach((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return;
+    const id = asText(item.id);
+    if (!id) return;
+    links.push({ id, url: asText(item.url) });
+  });
+  return links;
+}
+
+function normalizeScheduled(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const start = asText(value.start);
+  if (!start) return null;
+  return { start, end: asText(value.end) };
+}
+
+function normalizeCalendar(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const busy = [];
+  if (Array.isArray(data.busy)) {
+    data.busy.forEach((block) => {
+      if (!block || typeof block !== "object" || Array.isArray(block)) return;
+      const start = asText(block.start);
+      const end = asText(block.end);
+      if (!start || !end) return;
+      busy.push({ start, end, title: asText(block.title) || "Busy" });
+    });
+  }
+  const workday = data.workday && typeof data.workday === "object" && !Array.isArray(data.workday)
+    ? { start: asText(data.workday.start), end: asText(data.workday.end) }
+    : null;
+  return {
+    date: asText(data.date),
+    timezone: asText(data.timezone) || "Asia/Jerusalem",
+    workday,
+    busy,
+    updated: asText(data.updated),
+  };
 }
 
 function normalize(data) {
@@ -303,6 +350,9 @@ function normalize(data) {
       notes: asText(raw.notes),
       created: asText(raw.created),
       updated: asText(raw.updated),
+      tldr: asText(raw.tldr),
+      linear: normalizeLinear(raw.linear),
+      scheduled: normalizeScheduled(raw.scheduled),
     });
   });
   return {
@@ -346,6 +396,25 @@ function parsePayload(text) {
     }
   }
   return normalize(data);
+}
+
+function parseCalendar(text) {
+  const clean = String(text || "").replace(/^\uFEFF/, "").trim();
+  if (!clean) return null;
+  let data;
+  try {
+    data = JSON.parse(clean);
+  } catch {
+    return null;
+  }
+  if (data && data.encoding === "base64" && typeof data.content === "string" && data.date == null && data.busy == null) {
+    try {
+      data = JSON.parse(decodeBase64Utf8(data.content));
+    } catch {
+      return null;
+    }
+  }
+  return normalizeCalendar(data);
 }
 
 function classify(error) {
@@ -397,12 +466,74 @@ async function fetchRemote(token) {
   return parsePayload(await response.text());
 }
 
+async function fetchCalendar(token) {
+  const url = new URL(`https://api.github.com/repos/${encodeURIComponent(CONFIG.owner)}/${encodeURIComponent(CONFIG.repo)}/contents/calendar.json`);
+  url.searchParams.set("ref", CONFIG.branch);
+  try {
+    const response = await fetch(url.href, {
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.raw+json",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      },
+    });
+    if (!response.ok) return null;
+    return parseCalendar(await response.text());
+  } catch {
+    return null;
+  }
+}
+
+const FIXTURE_DAY = "2026-10-25";
+
+function shiftFixtureStamp(value, today) {
+  if (typeof value !== "string" || !value.includes(FIXTURE_DAY)) return value;
+  return value.split(FIXTURE_DAY).join(today);
+}
+
+function alignDemoBoard(data, calendar) {
+  const zone = (calendar && calendar.timezone) || "Asia/Jerusalem";
+  let today = FIXTURE_DAY;
+  try {
+    today = globalThis.ItayBoard.formatZonedDate(new Date(), zone);
+  } catch {
+    today = FIXTURE_DAY;
+  }
+  if (today === FIXTURE_DAY) return { data, calendar };
+  data.tasks.forEach((task) => {
+    if (task.dueRaw === FIXTURE_DAY) {
+      task.dueRaw = today;
+      task.dueDate = parseISODate(today);
+    }
+    if (task.scheduled) {
+      task.scheduled = {
+        start: shiftFixtureStamp(task.scheduled.start, today),
+        end: shiftFixtureStamp(task.scheduled.end, today),
+      };
+    }
+  });
+  if (calendar && calendar.date === FIXTURE_DAY) {
+    calendar = {
+      ...calendar,
+      date: today,
+      busy: (calendar.busy || []).map((block) => ({
+        ...block,
+        start: shiftFixtureStamp(block.start, today),
+        end: shiftFixtureStamp(block.end, today),
+      })),
+    };
+  }
+  return { data, calendar };
+}
+
 function loadPrefs() {
   const params = new URLSearchParams(location.search);
   const stored = readUI();
   state.demo = params.get("demo") === "1";
   state.theme = (params.get("theme") || stored.theme) === "dark" ? "dark" : "light";
-  state.view = (params.get("view") || stored.view) === "kanban" ? "kanban" : "table";
+  const requestedView = params.get("view") || stored.view;
+  state.view = requestedView === "kanban" || requestedView === "manager" ? requestedView : "table";
   state.groupBy = (params.get("group") || stored.groupBy) === "project" ? "project" : "status";
   const urlFilters = ["q", "project", "status", "priority", "hideDone"].some((key) => params.has(key));
   if (urlFilters) {
@@ -419,13 +550,14 @@ function loadPrefs() {
       projects: Array.isArray(stored.projects) ? stored.projects.filter((item) => typeof item === "string") : [],
       status: typeof stored.status === "string" ? stored.status : "",
       priority: typeof stored.priority === "string" ? stored.priority : "",
-      hideDone: Boolean(stored.hideDone),
+      hideDone: typeof stored.hideDone === "boolean" ? stored.hideDone : true,
     };
   }
-  const saved = stored.collapsed && Array.isArray(stored.collapsed[state.groupBy])
-    ? stored.collapsed[state.groupBy].filter((key) => typeof key === "string")
+  const activeGroup = state.view === "manager" ? "project" : state.groupBy;
+  const saved = stored.collapsed && Array.isArray(stored.collapsed[activeGroup])
+    ? stored.collapsed[activeGroup].filter((key) => typeof key === "string")
     : null;
-  state.collapsed = new Set(saved || (state.groupBy === "status" ? ["done"] : []));
+  state.collapsed = new Set(saved || (activeGroup === "status" ? ["done"] : []));
   state.token = storage.get(TOKEN_KEY) || "";
 }
 
@@ -458,7 +590,7 @@ function syncUrl() {
     hideDone: filters.hideDone,
     collapsed: {
       ...(current.collapsed || {}),
-      [state.groupBy]: [...state.collapsed],
+      [currentGroupBy()]: [...state.collapsed],
     },
   });
 }
@@ -476,9 +608,13 @@ function setTitle() {
   else document.title = "Itay's tasks";
 }
 
+function currentGroupBy() {
+  return state.view === "manager" ? "project" : state.groupBy;
+}
+
 function filtersActive() {
   const filters = state.filters;
-  return Boolean(filters.q || filters.status || filters.priority || filters.hideDone || filters.projects.length);
+  return Boolean(filters.q || filters.status || filters.priority || filters.projects.length);
 }
 
 function matchesFilter(task) {
@@ -489,7 +625,8 @@ function matchesFilter(task) {
   if (filters.projects.length && !filters.projects.includes(task.project)) return false;
   const query = filters.q.trim().toLowerCase();
   if (query) {
-    const haystack = [task.title, task.notes, task.waiting_on, task.source].join("\n").toLowerCase();
+    const linearIds = (task.linear || []).map((item) => item.id).join(" ");
+    const haystack = [task.title, task.tldr, task.notes, task.waiting_on, task.source, linearIds].join("\n").toLowerCase();
     if (!haystack.includes(query)) return false;
   }
   return true;
@@ -515,7 +652,7 @@ function uniquePush(list, value) {
 }
 
 function groupOrder() {
-  if (state.groupBy === "project") {
+  if (currentGroupBy() === "project") {
     const known = [...state.data.projects];
     const extra = [];
     state.data.tasks.forEach((task) => {
@@ -537,7 +674,7 @@ function grouped() {
   const buckets = new Map();
   groupOrder().forEach((key) => buckets.set(key, []));
   state.data.tasks.filter(matchesFilter).forEach((task) => {
-    const key = state.groupBy === "project" ? task.project : task.status;
+    const key = currentGroupBy() === "project" ? task.project : task.status;
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(task);
   });
@@ -562,6 +699,7 @@ function dueClass(task) {
   if (!task.dueDate || task.status === "done") return "";
   const diff = daysBetween(new Date(), task.dueDate);
   if (diff < 0) return "due-overdue";
+  if (diff === 0) return "due-today";
   if (diff <= 3) return "due-soon";
   return "";
 }
@@ -708,6 +846,9 @@ function dueNode(task) {
       span.append(el("span", { class: "sr-only", text: "Overdue. " }));
       span.append(document.createTextNode(formatDue(task.dueDate)));
       span.append(el("span", { class: "due-tag", text: "Overdue" }));
+    } else if (kind === "due-today") {
+      span.append(el("span", { class: "sr-only", text: "Due today. " }));
+      span.append(document.createTextNode("Today"));
     } else if (kind === "due-soon") {
       span.append(el("span", { class: "sr-only", text: "Due within 3 days. " }));
       span.append(document.createTextNode(formatDue(task.dueDate)));
@@ -732,6 +873,36 @@ function cell(label, child, className) {
   return td;
 }
 
+function taskTldr(task) {
+  const explicit = asText(task && task.tldr);
+  if (explicit) return explicit;
+  const notes = asText(task && task.notes);
+  if (!notes) return "";
+  const line = notes.split(/\r?\n/).map((part) => part.trim()).find(Boolean) || "";
+  const match = line.match(/^[\s\S]*?[.!?؟](?=\s|$)/);
+  return (match ? match[0] : line).trim();
+}
+
+function linearChips(task) {
+  const logic = globalThis.ItayBoard;
+  const links = logic ? logic.collectLinearLinks(task) : [];
+  if (!links.length) return null;
+  const row = el("div", { class: "linear-row" });
+  links.forEach((link) => {
+    const anchor = el("a", {
+      class: "linear-chip",
+      href: link.url,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      text: link.id,
+      title: `Open ${link.id} in Linear`,
+    });
+    anchor.addEventListener("click", (event) => event.stopPropagation());
+    row.append(anchor);
+  });
+  return row;
+}
+
 function taskCell(task) {
   const td = el("td", { class: "col-task" });
   const row = el("div", { class: "title-row" });
@@ -740,6 +911,8 @@ function taskCell(task) {
   td.append(row);
   const sub = task.source || task.notes;
   if (sub) td.append(el("div", { class: "task-sub", dir: "auto", text: sub }));
+  const chips = linearChips(task);
+  if (chips) td.append(chips);
   return td;
 }
 
@@ -806,25 +979,87 @@ function renderGroup(key, tasks) {
 }
 
 function renderCard(task) {
+  const card = el("div", { class: `card${state.openTaskId === task.id ? " is-open" : ""}` });
+  setBar(card, statusMeta(task.status).bar);
   const button = el("button", {
     type: "button",
-    class: `card${state.openTaskId === task.id ? " is-open" : ""}`,
+    class: "card-open",
     "data-action": "open-task",
     "data-id": task.id,
     "data-task-id": task.id,
   });
-  setBar(button, statusMeta(task.status).bar);
   button.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
   const tags = el("div", { class: "card-tags" });
-  if (state.groupBy !== "project") tags.append(projectTag(task.project));
-  if (state.groupBy !== "status") tags.append(statusPill(task.status));
+  if (currentGroupBy() !== "project") tags.append(projectTag(task.project));
+  if (currentGroupBy() !== "status") tags.append(statusPill(task.status));
   tags.append(priorityPill(task.priority));
   button.append(tags);
   const meta = el("div", { class: "card-meta" });
   meta.append(dueNode(task));
   button.append(meta);
   if (task.waiting_on) button.append(waitChip(task.waiting_on, task.status === "waiting"));
-  return button;
+  card.append(button);
+  const chips = linearChips(task);
+  if (chips) card.append(chips);
+  return card;
+}
+
+function renderManagerRow(task) {
+  const flag = dueClass(task);
+  const flagClass = flag === "due-overdue" ? " is-overdue" : flag === "due-today" ? " is-today" : "";
+  const row = el("div", {
+    class: `manager-row${flagClass}${state.openTaskId === task.id ? " is-open" : ""}`,
+  });
+  const open = el("button", {
+    type: "button",
+    class: "manager-open",
+    "data-action": "open-task",
+    "data-id": task.id,
+    "data-task-id": task.id,
+    "aria-label": `Open ${task.title}`,
+  });
+  const main = el("div", { class: "manager-main" });
+  main.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  const summary = taskTldr(task);
+  if (summary) main.append(el("p", { class: "tldr", dir: "auto", text: summary }));
+  const due = el("div", { class: "manager-due" });
+  due.append(dueNode(task));
+  open.append(main, due);
+  row.append(open);
+  const meta = el("div", { class: "manager-meta" });
+  meta.append(projectTag(task.project), priorityPill(task.priority));
+  const chips = linearChips(task);
+  if (chips) meta.append(chips);
+  row.append(meta);
+  return row;
+}
+
+function renderManagerGroup(key, tasks) {
+  const meta = groupMeta(key);
+  const collapsed = state.collapsed.has(key);
+  const section = el("section", { class: `group${collapsed ? " is-collapsed" : ""}` });
+  setBar(section, meta.bar);
+  const header = el("button", {
+    type: "button",
+    class: "group-header",
+    "data-action": "toggle-group",
+    "data-key": key,
+    "aria-expanded": String(!collapsed),
+  });
+  const chevron = icon("chevron");
+  chevron.classList.add("chevron");
+  const name = el("span", { class: "group-name", dir: "auto", text: meta.label });
+  const count = el("span", { class: "count", text: String(tasks.length) });
+  count.style.background = safeHex(meta.bar);
+  count.style.color = pillFg(meta.bar);
+  header.append(chevron, name, count);
+  section.append(header);
+  if (!collapsed) {
+    const list = el("div", { class: "manager-list" });
+    tasks.forEach((item) => list.append(renderManagerRow(item)));
+    section.append(list);
+  }
+  return section;
 }
 
 function renderKanban(groups) {
@@ -861,7 +1096,7 @@ function emptyState(title, filtered) {
   const box = el("div", { class: "empty" });
   box.append(el("h2", { text: title }));
   if (filtered) {
-    box.append(el("p", { text: "Try a different search, or clear the project, status, priority, and hide-done filters." }));
+    box.append(el("p", { text: "Try a different search, or clear the project, status, and priority filters." }));
     box.append(el("button", { type: "button", class: "btn", "data-action": "clear-filters", text: "Clear filters" }));
   } else {
     box.append(el("p", { text: "Add tasks in the private repository, then refresh." }));
@@ -880,6 +1115,12 @@ function renderBoardList() {
   }
   if (!groups.length) {
     host.append(emptyState("No tasks match these filters.", true));
+    return;
+  }
+  if (state.view === "manager") {
+    const wrap = el("div", { class: "groups" });
+    groups.forEach(([key, tasks]) => wrap.append(renderManagerGroup(key, tasks)));
+    host.append(wrap);
     return;
   }
   if (state.view === "kanban") {
@@ -926,11 +1167,123 @@ function panelField(label, value) {
   return wrap;
 }
 
+function formatAgendaHeading(agenda) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(agenda.date || "");
+  let dateText = agenda.date;
+  if (match) {
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    dateText = date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  }
+  return `${dateText} · ${agenda.workday.start}–${agenda.workday.end} · ${agenda.timezone}`;
+}
+
+function renderAgendaItem(item) {
+  const row = el("div", { class: item.kind === "meeting" ? "agenda-item is-meeting" : "agenda-item" });
+  row.append(el("div", { class: "agenda-time", text: `${item.startLabel}–${item.endLabel}` }));
+  const body = el("div", { class: "agenda-body" });
+  if (item.kind === "meeting") {
+    body.append(el("div", { class: "agenda-item-title", text: item.title }));
+    body.append(el("div", { class: "agenda-kind", text: "Meeting" }));
+  } else {
+    body.append(el("div", { class: "agenda-item-title", dir: "auto", text: item.task.title }));
+    const summary = taskTldr(item.task);
+    if (summary) body.append(el("p", { class: "tldr", dir: "auto", text: summary }));
+    const meta = el("div", { class: "agenda-meta" });
+    if (item.pinned) meta.append(el("span", { class: "due-tag", text: "Scheduled" }));
+    meta.append(priorityPill(item.task.priority), projectTag(item.task.project));
+    const chips = linearChips(item.task);
+    if (chips) meta.append(chips);
+    body.append(meta);
+  }
+  row.append(body);
+  return row;
+}
+
+function renderAgenda() {
+  const host = document.getElementById("agenda-root");
+  if (!host || !globalThis.ItayBoard) return;
+  if (!state.agendaOpen || !state.data) {
+    host.replaceChildren();
+    delete host.dataset.open;
+    return;
+  }
+  if (host.dataset.open === "1" && host.dataset.version === String(state.dataVersion)) return;
+  const logic = globalThis.ItayBoard;
+  const agenda = logic.buildAgenda({
+    tasks: state.data.tasks,
+    priorities: state.data.priorities,
+    now: new Date(),
+    calendar: state.calendar,
+  });
+  state.agendaText = logic.formatAgendaText(agenda);
+  host.replaceChildren();
+  host.dataset.open = "1";
+  host.dataset.version = String(state.dataVersion);
+  const backdrop = el("div", { class: "backdrop", "data-action": "close-agenda" });
+  const panel = el("aside", {
+    class: "panel agenda-panel",
+    id: "agenda",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": "agenda-title",
+    tabindex: "-1",
+    "data-action": "noop",
+  });
+  const head = el("div", { class: "agenda-head" });
+  const titles = el("div");
+  titles.append(el("h2", { id: "agenda-title", class: "agenda-title", text: "Daily agenda" }));
+  titles.append(el("p", { class: "agenda-sub", text: formatAgendaHeading(agenda) }));
+  const actions = el("div", { class: "agenda-actions" });
+  actions.append(el("button", {
+    type: "button",
+    id: "copy-agenda",
+    class: "btn btn-primary btn-small",
+    "data-action": "copy-agenda",
+    text: "Copy agenda",
+  }));
+  const close = el("button", { type: "button", class: "icon-btn", "data-action": "close-agenda", "aria-label": "Close agenda" });
+  close.append(icon("close"));
+  actions.append(close);
+  head.append(titles, actions);
+  panel.append(head);
+  if (agenda.notWorkdayNote) panel.append(el("p", { class: "agenda-note", text: agenda.notWorkdayNote }));
+  if (agenda.calendarNote) panel.append(el("p", { class: "agenda-note is-warn", text: agenda.calendarNote }));
+  const list = el("div", { class: "agenda-list" });
+  if (!agenda.items.length) list.append(el("p", { class: "muted", text: "Nothing scheduled." }));
+  agenda.items.forEach((item) => list.append(renderAgendaItem(item)));
+  panel.append(list);
+  const overflow = el("section", { class: "agenda-overflow" });
+  overflow.append(el("h3", { text: "Didn't fit today" }));
+  if (!agenda.overflow.length) {
+    overflow.append(el("p", { class: "muted", text: "Everything open fit in the workday." }));
+  } else {
+    const items = el("ul", { class: "overflow-list" });
+    agenda.overflow.forEach((task) => {
+      const li = el("li");
+      const button = el("button", {
+        type: "button",
+        class: "overflow-task",
+        "data-action": "open-task",
+        "data-id": task.id,
+      });
+      button.append(el("span", { class: "overflow-title", dir: "auto", text: task.title }));
+      const meta = [task.project, priorityMeta(task.priority).label].filter(Boolean).join(" · ");
+      if (meta) button.append(el("span", { class: "overflow-meta", text: meta }));
+      li.append(button);
+      items.append(li);
+    });
+    overflow.append(items);
+  }
+  panel.append(overflow);
+  backdrop.append(panel);
+  host.append(backdrop);
+}
+
 function renderPanel() {
   const host = document.getElementById("panel-root");
   if (!host) return;
   host.replaceChildren();
-  document.body.classList.toggle("panel-open", Boolean(state.openTaskId));
+  document.body.classList.toggle("panel-open", Boolean(state.openTaskId || state.agendaOpen));
   if (!state.openTaskId) return;
   const task = state.data.tasks.find((item) => item.id === state.openTaskId);
   if (!task) return;
@@ -951,6 +1304,16 @@ function renderPanel() {
   const tags = el("div", { class: "card-tags" });
   tags.append(statusPill(task.status), priorityPill(task.priority));
   panel.append(head, tags, el("h2", { id: "panel-title", class: "panel-title", dir: "auto", text: task.title }));
+  const summary = taskTldr(task);
+  if (summary) panel.append(el("p", { class: "tldr panel-tldr", dir: "auto", text: summary }));
+  const chips = linearChips(task);
+  if (chips) panel.append(panelField("Linear", chips));
+  if (task.scheduled && task.scheduled.start) {
+    const when = task.scheduled.end
+      ? `${formatTimestamp(task.scheduled.start)} – ${formatTimestamp(task.scheduled.end)}`
+      : formatTimestamp(task.scheduled.start);
+    panel.append(panelField("Scheduled", el("p", { class: "prose", text: when })));
+  }
   panel.append(panelField("Project", projectTag(task.project)));
   panel.append(panelField("Due", dueNode(task)));
   panel.append(panelField("Waiting on", task.waiting_on ? waitChip(task.waiting_on, true) : el("span", { class: "muted", text: "—" })));
@@ -1089,7 +1452,11 @@ function updateBoard() {
   const clearSearch = document.getElementById("clear-search");
   if (clearSearch) clearSearch.hidden = !state.filters.q;
   const hide = document.getElementById("hide-done");
-  if (hide) hide.setAttribute("aria-pressed", String(state.filters.hideDone));
+  if (hide) {
+    hide.setAttribute("aria-pressed", String(state.filters.hideDone));
+    hide.textContent = state.filters.hideDone ? "Show done" : "Hide done";
+    hide.title = state.filters.hideDone ? "Done tasks are hidden" : "Done tasks are visible";
+  }
   const clearFilters = document.getElementById("clear-filters");
   if (clearFilters) clearFilters.hidden = !filtersActive();
   const showing = document.getElementById("showing");
@@ -1111,6 +1478,10 @@ function updateBoard() {
   fillSelect("priority-filter", priorityOptions(), state.filters.priority);
   syncPressed("view", state.view);
   syncPressed("group", state.groupBy);
+  const groupBy = document.getElementById("group-by");
+  if (groupBy) groupBy.hidden = state.view === "manager";
+  const managerLabel = document.getElementById("manager-group-label");
+  if (managerLabel) managerLabel.hidden = state.view !== "manager";
   updateThemeButton();
   renderWarnings();
   renderInlineError();
@@ -1118,6 +1489,7 @@ function updateBoard() {
   renderProjectMenu();
   renderBoardList();
   renderPanel();
+  renderAgenda();
 }
 
 function segment(action, options, current, label) {
@@ -1188,7 +1560,8 @@ function renderToolbar() {
     class: "btn",
     "data-action": "hide-done",
     "aria-pressed": String(state.filters.hideDone),
-    text: "Hide done",
+    title: state.filters.hideDone ? "Done tasks are hidden" : "Done tasks are visible",
+    text: state.filters.hideDone ? "Show done" : "Hide done",
   }));
   const clearFilters = el("button", { type: "button", id: "clear-filters", class: "text-btn", "data-action": "clear-filters", text: "Clear filters" });
   if (!filtersActive()) clearFilters.hidden = true;
@@ -1203,8 +1576,14 @@ function renderBoardShell() {
   const left = el("div", { class: "top-left" });
   left.append(brandLockup(), el("p", { id: "last-updated", class: "updated", text: "Last updated —" }));
   const actions = el("div", { class: "top-actions" });
-  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"]], state.view));
-  actions.append(segment("group", [["status", "Status"], ["project", "Project"]], state.groupBy, "Group by"));
+  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"]], state.view));
+  const groupSeg = segment("group", [["status", "Status"], ["project", "Project"]], state.groupBy, "Group by");
+  groupSeg.id = "group-by";
+  if (state.view === "manager") groupSeg.hidden = true;
+  const managerLabel = el("span", { id: "manager-group-label", class: "segment-label", text: "Grouped by project" });
+  if (state.view !== "manager") managerLabel.hidden = true;
+  actions.append(groupSeg, managerLabel);
+  actions.append(el("button", { type: "button", id: "agenda-btn", class: "btn", "data-action": "open-agenda", text: "Daily agenda" }));
   actions.append(el("button", { type: "button", id: "theme-btn", class: "icon-btn", "data-action": "theme" }));
   const refresh = el("button", { type: "button", id: "refresh-btn", class: "btn", "data-action": "refresh" });
   refresh.append(icon("refresh"), document.createTextNode("Refresh"));
@@ -1238,7 +1617,7 @@ function renderBoardShell() {
     el("div", { id: "board-list" }),
     el("p", { class: "footnote", text: "Read-only. Edit tasks in the private data repository." }),
   );
-  page.append(sticky, main, el("div", { id: "panel-root" }));
+  page.append(sticky, main, el("div", { id: "panel-root" }), el("div", { id: "agenda-root" }));
   return page;
 }
 
@@ -1386,9 +1765,11 @@ async function loadRemote() {
     updateBoard();
   }
   try {
-    const data = await fetchRemote(token);
+    const [data, calendar] = await Promise.all([fetchRemote(token), fetchCalendar(token)]);
     if (id !== requestId) return;
     state.data = data;
+    state.calendar = calendar;
+    state.dataVersion += 1;
     state.error = null;
     state.inlineError = null;
     state.mode = "board";
@@ -1430,8 +1811,18 @@ async function loadDemo() {
       throw error;
     }
     const data = parsePayload(await response.text());
+    let calendar = null;
+    try {
+      const calResponse = await fetch("demo-calendar.json", { cache: "no-store" });
+      if (calResponse.ok) calendar = parseCalendar(await calResponse.text());
+    } catch {
+      calendar = null;
+    }
+    const aligned = alignDemoBoard(data, calendar);
     if (id !== requestId) return;
-    state.data = data;
+    state.data = aligned.data;
+    state.calendar = aligned.calendar;
+    state.dataVersion += 1;
     state.error = null;
     state.inlineError = null;
     state.mode = "board";
@@ -1502,7 +1893,82 @@ function closePanel() {
   if (id) document.querySelector(`[data-task-id="${cssEscape(id)}"]`)?.focus();
 }
 
+function openAgenda() {
+  state.openTaskId = null;
+  state.agendaOpen = true;
+  const host = document.getElementById("agenda-root");
+  if (host) delete host.dataset.open;
+  updateBoard();
+  document.querySelector("#agenda [data-action='close-agenda']")?.focus();
+}
+
+function closeAgenda() {
+  state.agendaOpen = false;
+  const host = document.getElementById("agenda-root");
+  if (host) {
+    delete host.dataset.open;
+    host.replaceChildren();
+  }
+  document.body.classList.toggle("panel-open", Boolean(state.openTaskId));
+  document.getElementById("agenda-btn")?.focus();
+}
+
+async function copyAgenda() {
+  const text = state.agendaText || "";
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "0";
+    area.style.left = "-9999px";
+    document.body.append(area);
+    area.select();
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    area.remove();
+  }
+  const button = document.getElementById("copy-agenda");
+  if (button) button.textContent = ok ? "Copied" : "Copy failed";
+  const live = document.getElementById("live");
+  if (live) live.textContent = ok ? "Agenda copied." : "Couldn't copy the agenda.";
+  window.setTimeout(() => {
+    if (button && button.isConnected) button.textContent = "Copy agenda";
+  }, 2000);
+}
+
+function trapFocus(event, container) {
+  const focusable = [...container.querySelectorAll("button, a[href], input, select, textarea")].filter((node) => !node.disabled);
+  if (!focusable.length) return false;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
+
 function onClick(event) {
+  if (event.target.closest("a")) return;
   const button = event.target.closest("[data-action]");
   if (!button || !document.getElementById("app").contains(button)) return;
   const action = button.dataset.action;
@@ -1528,7 +1994,16 @@ function onClick(event) {
     syncUrl();
     updateThemeButton();
   } else if (action === "view") {
-    state.view = button.dataset.value === "kanban" ? "kanban" : "table";
+    const nextView = button.dataset.value === "kanban" ? "kanban" : button.dataset.value === "manager" ? "manager" : "table";
+    if (nextView === state.view) return;
+    const prevGroup = currentGroupBy();
+    state.view = nextView;
+    const nextGroup = currentGroupBy();
+    if (prevGroup !== nextGroup) {
+      const stored = readUI();
+      const saved = stored.collapsed && Array.isArray(stored.collapsed[nextGroup]) ? stored.collapsed[nextGroup] : null;
+      state.collapsed = new Set(saved || (nextGroup === "status" ? ["done"] : []));
+    }
     syncUrl();
     updateBoard();
   } else if (action === "group") {
@@ -1548,11 +2023,18 @@ function onClick(event) {
     syncUrl();
     updateBoard();
   } else if (action === "open-task") {
+    if (state.agendaOpen) closeAgenda();
     openTask(button.dataset.id);
+  } else if (action === "open-agenda") {
+    openAgenda();
+  } else if (action === "close-agenda") {
+    closeAgenda();
+  } else if (action === "copy-agenda") {
+    copyAgenda();
   } else if (action === "close-panel") {
     closePanel();
   } else if (action === "clear-filters") {
-    state.filters = { q: "", projects: [], status: "", priority: "", hideDone: false };
+    state.filters = { q: "", projects: [], status: "", priority: "", hideDone: state.filters.hideDone };
     state.projectMenuOpen = false;
     syncUrl();
     updateBoard();
@@ -1629,6 +2111,10 @@ function onSubmit(event) {
 
 function onKeydown(event) {
   if (event.key === "Escape") {
+    if (state.agendaOpen) {
+      closeAgenda();
+      return;
+    }
     if (state.projectMenuOpen) {
       state.projectMenuOpen = false;
       renderProjectMenu();
@@ -1638,22 +2124,12 @@ function onKeydown(event) {
     if (state.openTaskId) closePanel();
     return;
   }
-  if (state.openTaskId && event.key === "Tab") {
-    const panel = document.getElementById("panel");
-    if (!panel) return;
-    const focusable = [...panel.querySelectorAll("button, a, input, select, textarea")];
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-    return;
+  if (event.key === "Tab") {
+    const container = state.agendaOpen ? document.getElementById("agenda") : state.openTaskId ? document.getElementById("panel") : null;
+    if (container) trapFocus(event, container);
+    if (container) return;
   }
+  if (event.target.closest && event.target.closest("a")) return;
   const row = event.target.closest && event.target.closest('[data-action="open-task"]');
   if (row && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
