@@ -23,6 +23,27 @@ const PROJECT_COLORS = {
 
 const PALETTE = ["#0073ea", "#00c875", "#a25ddc", "#ff642e", "#175a63", "#ff158a", "#037f4c", "#7f5347", "#579bfc", "#bb3354"];
 
+const QUADRANTS = [
+  { key: "Q1", name: "Do", subtitle: "Urgent + important", color: "#e2445c" },
+  { key: "Q2", name: "Schedule", subtitle: "Important, not urgent", color: "#0073ea" },
+  { key: "Q3", name: "Delegate", subtitle: "Urgent, not important", color: "#fdab3d" },
+  { key: "Q4", name: "Drop", subtitle: "Neither urgent nor important", color: "#0f6e6b" },
+];
+
+const QUADRANT_FILTERS = ["Q1", "Q2", "Q3", "Q4", "unsorted"];
+
+const VIEWS = ["table", "kanban", "manager", "eisenhower"];
+
+const TABLE_COLUMNS = [
+  { key: "title", label: "Task", className: "col-task" },
+  { key: "project", label: "Project", className: "col-project" },
+  { key: "status", label: "Status", className: "col-status" },
+  { key: "priority", label: "Priority", className: "col-priority" },
+  { key: "quadrant", label: "Quadrant", className: "col-quadrant" },
+  { key: "due", label: "Due", className: "col-due" },
+  { key: "waiting", label: "Waiting on", className: "col-waiting" },
+];
+
 const ICONS = {
   chevron: ["M6 9l6 6 6-6"],
   search: ["M11 11m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0", "M20 20l-3.5-3.5"],
@@ -52,7 +73,8 @@ const state = {
   storageWarning: "",
   setupMessage: "",
   refreshing: false,
-  filters: { q: "", projects: [], status: "", priority: "", hideDone: false },
+  filters: { q: "", projects: [], status: "", priority: "", quadrant: "", hideDone: false },
+  sort: { key: "", dir: "asc" },
   groupBy: "status",
   view: "table",
   theme: "light",
@@ -262,6 +284,20 @@ function priorityMeta(priority) {
   return known[priority] || { label: humanize(priority), bar: "#e6e9ef" };
 }
 
+function quadrantInfo(key) {
+  return QUADRANTS.find((item) => item.key === key) || null;
+}
+
+function quadrantBadge(task) {
+  const info = quadrantInfo(task && task.quadrant);
+  if (!info) return el("span", { class: "quad-badge is-unsorted", text: "Unsorted" });
+  const badge = el("span", { class: `quad-badge quad-${info.key.toLowerCase()}`, text: `${info.key} ${info.name}` });
+  const color = safeHex(info.color);
+  badge.style.background = color;
+  badge.style.color = pillFg(color);
+  return badge;
+}
+
 function groupMeta(key) {
   if (currentGroupBy() === "status") return statusMeta(key);
   const bar = paletteColor(key);
@@ -285,6 +321,19 @@ function normalizeScheduled(value) {
   const start = asText(value.start);
   if (!start) return null;
   return { start, end: asText(value.end) };
+}
+
+function normalizeQuadrant(value) {
+  const text = asText(value).toUpperCase();
+  return QUADRANTS.some((item) => item.key === text) ? text : "";
+}
+
+function cleanQuadrantFilter(value) {
+  return QUADRANT_FILTERS.includes(value) ? value : "";
+}
+
+function normalizeView(value) {
+  return VIEWS.includes(value) ? value : "table";
 }
 
 function normalizeCalendar(data) {
@@ -353,6 +402,7 @@ function normalize(data) {
       tldr: asText(raw.tldr),
       linear: normalizeLinear(raw.linear),
       scheduled: normalizeScheduled(raw.scheduled),
+      quadrant: normalizeQuadrant(raw.quadrant),
     });
   });
   return {
@@ -533,15 +583,16 @@ function loadPrefs() {
   state.demo = params.get("demo") === "1";
   state.theme = (params.get("theme") || stored.theme) === "dark" ? "dark" : "light";
   const requestedView = params.get("view") || stored.view;
-  state.view = requestedView === "kanban" || requestedView === "manager" ? requestedView : "table";
+  state.view = normalizeView(requestedView);
   state.groupBy = (params.get("group") || stored.groupBy) === "project" ? "project" : "status";
-  const urlFilters = ["q", "project", "status", "priority", "hideDone"].some((key) => params.has(key));
+  const urlFilters = ["q", "project", "status", "priority", "quadrant", "hideDone"].some((key) => params.has(key));
   if (urlFilters) {
     state.filters = {
       q: params.get("q") || "",
       projects: params.getAll("project").filter(Boolean),
       status: params.get("status") || "",
       priority: params.get("priority") || "",
+      quadrant: cleanQuadrantFilter(params.get("quadrant") || ""),
       hideDone: params.get("hideDone") === "1",
     };
   } else {
@@ -550,6 +601,7 @@ function loadPrefs() {
       projects: Array.isArray(stored.projects) ? stored.projects.filter((item) => typeof item === "string") : [],
       status: typeof stored.status === "string" ? stored.status : "",
       priority: typeof stored.priority === "string" ? stored.priority : "",
+      quadrant: cleanQuadrantFilter(typeof stored.quadrant === "string" ? stored.quadrant : ""),
       hideDone: typeof stored.hideDone === "boolean" ? stored.hideDone : true,
     };
   }
@@ -569,6 +621,7 @@ function syncUrl() {
   filters.projects.forEach((project) => params.append("project", project));
   if (filters.status) params.set("status", filters.status);
   if (filters.priority) params.set("priority", filters.priority);
+  if (filters.quadrant) params.set("quadrant", filters.quadrant);
   if (filters.hideDone) params.set("hideDone", "1");
   if (state.groupBy !== "status") params.set("group", state.groupBy);
   if (state.view !== "table") params.set("view", state.view);
@@ -587,6 +640,7 @@ function syncUrl() {
     projects: filters.projects,
     status: filters.status,
     priority: filters.priority,
+    quadrant: filters.quadrant,
     hideDone: filters.hideDone,
     collapsed: {
       ...(current.collapsed || {}),
@@ -614,7 +668,7 @@ function currentGroupBy() {
 
 function filtersActive() {
   const filters = state.filters;
-  return Boolean(filters.q || filters.status || filters.priority || filters.projects.length);
+  return Boolean(filters.q || filters.status || filters.priority || filters.quadrant || filters.projects.length);
 }
 
 function matchesFilter(task) {
@@ -622,11 +676,14 @@ function matchesFilter(task) {
   if (filters.hideDone && task.status === "done") return false;
   if (filters.status && task.status !== filters.status) return false;
   if (filters.priority && task.priority !== filters.priority) return false;
+  if (filters.quadrant === "unsorted" && task.quadrant) return false;
+  if (filters.quadrant && filters.quadrant !== "unsorted" && task.quadrant !== filters.quadrant) return false;
   if (filters.projects.length && !filters.projects.includes(task.project)) return false;
   const query = filters.q.trim().toLowerCase();
   if (query) {
     const linearIds = (task.linear || []).map((item) => item.id).join(" ");
-    const haystack = [task.title, task.tldr, task.notes, task.waiting_on, task.source, linearIds].join("\n").toLowerCase();
+    const quad = quadrantInfo(task.quadrant);
+    const haystack = [task.title, task.tldr, task.notes, task.waiting_on, task.source, linearIds, task.quadrant, quad && quad.name].join("\n").toLowerCase();
     if (!haystack.includes(query)) return false;
   }
   return true;
@@ -638,13 +695,48 @@ function priorityRank(priority) {
   return index === -1 ? order.length + 1 : index;
 }
 
-function compareTasks(a, b) {
+function statusRank(status) {
+  const order = state.data.statuses.length ? state.data.statuses : ["todo", "in_progress", "waiting", "done"];
+  const index = order.indexOf(status);
+  return index === -1 ? order.length + 1 : index;
+}
+
+function quadrantSortRank(quadrant) {
+  const index = QUADRANTS.findIndex((item) => item.key === quadrant);
+  return index === -1 ? QUADRANTS.length : index;
+}
+
+function compareColumn(a, b, key) {
+  if (key === "title") return a.title.localeCompare(b.title);
+  if (key === "project") return a.project.localeCompare(b.project);
+  if (key === "status") return statusRank(a.status) - statusRank(b.status) || a.status.localeCompare(b.status);
+  if (key === "priority") return priorityRank(a.priority) - priorityRank(b.priority);
+  if (key === "quadrant") return quadrantSortRank(a.quadrant) - quadrantSortRank(b.quadrant);
+  if (key === "due") {
+    const aDue = a.dueDate ? a.dueDate.getTime() : Infinity;
+    const bDue = b.dueDate ? b.dueDate.getTime() : Infinity;
+    return aDue - bDue;
+  }
+  if (key === "waiting") return (a.waiting_on || "\uffff").localeCompare(b.waiting_on || "\uffff");
+  return 0;
+}
+
+function compareDefault(a, b) {
   const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
   if (byPriority) return byPriority;
   const aDue = a.dueDate ? a.dueDate.getTime() : Infinity;
   const bDue = b.dueDate ? b.dueDate.getTime() : Infinity;
   if (aDue !== bDue) return aDue - bDue;
   return a.title.localeCompare(b.title);
+}
+
+function compareTasks(a, b) {
+  if (state.view === "table" && state.sort.key) {
+    const primary = compareColumn(a, b, state.sort.key);
+    const directed = state.sort.dir === "desc" ? -primary : primary;
+    if (directed) return directed;
+  }
+  return compareDefault(a, b);
 }
 
 function uniquePush(list, value) {
@@ -731,6 +823,14 @@ function priorityOptions() {
   state.data.tasks.forEach((task) => uniquePush(keys, task.priority));
   uniquePush(keys, state.filters.priority);
   return [{ value: "", label: "All priorities" }, ...keys.map((key) => ({ value: key, label: priorityMeta(key).label }))];
+}
+
+function quadrantOptions() {
+  return [
+    { value: "", label: "All quadrants" },
+    ...QUADRANTS.map((item) => ({ value: item.key, label: `${item.key} ${item.name}` })),
+    { value: "unsorted", label: "Unsorted" },
+  ];
 }
 
 function initials(name) {
@@ -932,6 +1032,7 @@ function renderRow(task) {
     cell("Project", projectTag(task.project), "col-project"),
     cell("Status", statusPill(task.status), "col-status"),
     cell("Priority", priorityPill(task.priority), "col-priority"),
+    cell("Quadrant", quadrantBadge(task), "col-quadrant"),
     cell("Due", dueNode(task), "col-due"),
     cell("Waiting on", task.waiting_on ? waitChip(task.waiting_on, task.status === "waiting") : el("span", { class: "muted", text: "—" }), "col-waiting"),
   );
@@ -941,8 +1042,23 @@ function renderRow(task) {
 function renderGroupTable(tasks) {
   const table = el("table", { class: "task-table" });
   const head = el("tr");
-  ["Task", "Project", "Status", "Priority", "Due", "Waiting on"].forEach((label) => {
-    head.append(el("th", { scope: "col", text: label }));
+  TABLE_COLUMNS.forEach((column) => {
+    const active = state.sort.key === column.key;
+    const th = el("th", { scope: "col", class: column.className });
+    th.setAttribute("aria-sort", active ? (state.sort.dir === "desc" ? "descending" : "ascending") : "none");
+    const button = el("button", {
+      type: "button",
+      class: `sort-btn${active ? " is-active" : ""}`,
+      "data-action": "sort",
+      "data-key": column.key,
+      "aria-label": `Sort by ${column.label}`,
+    });
+    button.append(document.createTextNode(column.label));
+    if (active) {
+      button.append(el("span", { class: "sort-mark", "aria-hidden": "true", text: state.sort.dir === "desc" ? "↓" : "↑" }));
+    }
+    th.append(button);
+    head.append(th);
   });
   const thead = el("thead");
   thead.append(head);
@@ -1027,7 +1143,7 @@ function renderManagerRow(task) {
   open.append(main, due);
   row.append(open);
   const meta = el("div", { class: "manager-meta" });
-  meta.append(projectTag(task.project), priorityPill(task.priority));
+  meta.append(quadrantBadge(task), projectTag(task.project), priorityPill(task.priority));
   const chips = linearChips(task);
   if (chips) meta.append(chips);
   row.append(meta);
@@ -1060,6 +1176,79 @@ function renderManagerGroup(key, tasks) {
     section.append(list);
   }
   return section;
+}
+
+function renderMatrixCard(task) {
+  const card = el("article", {
+    class: `matrix-card${state.openTaskId === task.id ? " is-open" : ""}`,
+    "data-task-id": task.id,
+  });
+  const button = el("button", {
+    type: "button",
+    class: "matrix-open",
+    "data-action": "open-task",
+    "data-id": task.id,
+    "aria-label": `Open ${task.title}`,
+  });
+  button.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  const summary = taskTldr(task);
+  if (summary) button.append(el("p", { class: "tldr", dir: "auto", text: summary }));
+  const meta = el("div", { class: "matrix-meta" });
+  meta.append(dueNode(task), projectTag(task.project));
+  button.append(meta);
+  card.append(button);
+  const chips = linearChips(task);
+  if (chips) card.append(chips);
+  return card;
+}
+
+function renderQuadCell(info, tasks) {
+  const section = el("section", {
+    class: `quad quad-${info.key.toLowerCase()}`,
+    "data-quadrant": info.key,
+  });
+  const color = safeHex(info.color);
+  section.style.setProperty("--q", color);
+  section.style.setProperty("--q-ink", titleColor(color));
+  const head = el("div", { class: "quad-head" });
+  const titles = el("div", { class: "quad-titles" });
+  titles.append(el("h2", { class: "quad-label", text: `${info.key} ${info.name}` }));
+  titles.append(el("p", { class: "quad-sub", text: info.subtitle }));
+  const count = el("span", { class: "count", text: String(tasks.length) });
+  count.style.background = color;
+  count.style.color = pillFg(color);
+  head.append(titles, count);
+  const cards = el("div", { class: "quad-cards" });
+  if (!tasks.length) cards.append(el("p", { class: "quad-empty", text: "No tasks" }));
+  else tasks.forEach((task) => cards.append(renderMatrixCard(task)));
+  section.append(head, cards);
+  return section;
+}
+
+function renderEisenhower(tasks) {
+  const board = el("div", { class: "eisenhower" });
+  const matrix = el("div", { class: "matrix", role: "group", "aria-label": "Eisenhower matrix" });
+  QUADRANTS.forEach((info) => {
+    const cellTasks = tasks.filter((task) => task.quadrant === info.key).sort(compareDefault);
+    matrix.append(renderQuadCell(info, cellTasks));
+  });
+  board.append(matrix);
+  const unsorted = tasks.filter((task) => !task.quadrant).sort(compareDefault);
+  if (!unsorted.length) return board;
+  const strip = el("section", { class: "unsorted", "data-quadrant": "unsorted" });
+  const head = el("div", { class: "unsorted-head" });
+  const titles = el("div", { class: "quad-titles" });
+  titles.append(el("h2", { class: "quad-label", text: "Unsorted" }));
+  titles.append(el("p", { class: "quad-sub", text: "No quadrant set" }));
+  const count = el("span", { class: "count", text: String(unsorted.length) });
+  count.style.background = "#c4c4c4";
+  count.style.color = pillFg("#c4c4c4");
+  head.append(titles, count);
+  const grid = el("div", { class: "unsorted-grid" });
+  unsorted.forEach((task) => grid.append(renderMatrixCard(task)));
+  strip.append(head, grid);
+  board.append(strip);
+  return board;
 }
 
 function renderKanban(groups) {
@@ -1096,7 +1285,7 @@ function emptyState(title, filtered) {
   const box = el("div", { class: "empty" });
   box.append(el("h2", { text: title }));
   if (filtered) {
-    box.append(el("p", { text: "Try a different search, or clear the project, status, and priority filters." }));
+    box.append(el("p", { text: "Try a different search, or clear the project, status, priority, and quadrant filters." }));
     box.append(el("button", { type: "button", class: "btn", "data-action": "clear-filters", text: "Clear filters" }));
   } else {
     box.append(el("p", { text: "Add tasks in the private repository, then refresh." }));
@@ -1107,12 +1296,21 @@ function emptyState(title, filtered) {
 function renderBoardList() {
   const host = document.getElementById("board-list");
   if (!host) return;
-  const groups = grouped();
   host.replaceChildren();
   if (!state.data.tasks.length) {
     host.append(emptyState("No tasks in this file yet.", false));
     return;
   }
+  if (state.view === "eisenhower") {
+    const tasks = state.data.tasks.filter(matchesFilter);
+    if (!tasks.length) {
+      host.append(emptyState("No tasks match these filters.", true));
+      return;
+    }
+    host.append(renderEisenhower(tasks));
+    return;
+  }
+  const groups = grouped();
   if (!groups.length) {
     host.append(emptyState("No tasks match these filters.", true));
     return;
@@ -1190,7 +1388,7 @@ function renderAgendaItem(item) {
     if (summary) body.append(el("p", { class: "tldr", dir: "auto", text: summary }));
     const meta = el("div", { class: "agenda-meta" });
     if (item.pinned) meta.append(el("span", { class: "due-tag", text: "Scheduled" }));
-    meta.append(priorityPill(item.task.priority), projectTag(item.task.project));
+    meta.append(quadrantBadge(item.task), priorityPill(item.task.priority), projectTag(item.task.project));
     const chips = linearChips(item.task);
     if (chips) meta.append(chips);
     body.append(meta);
@@ -1267,7 +1465,8 @@ function renderAgenda() {
         "data-id": task.id,
       });
       button.append(el("span", { class: "overflow-title", dir: "auto", text: task.title }));
-      const meta = [task.project, priorityMeta(task.priority).label].filter(Boolean).join(" · ");
+      const info = quadrantInfo(task.quadrant);
+      const meta = [info ? `${info.key} ${info.name}` : "Unsorted", task.project, priorityMeta(task.priority).label].filter(Boolean).join(" · ");
       if (meta) button.append(el("span", { class: "overflow-meta", text: meta }));
       li.append(button);
       items.append(li);
@@ -1302,7 +1501,7 @@ function renderPanel() {
   close.append(icon("close"));
   head.append(close);
   const tags = el("div", { class: "card-tags" });
-  tags.append(statusPill(task.status), priorityPill(task.priority));
+  tags.append(statusPill(task.status), priorityPill(task.priority), quadrantBadge(task));
   panel.append(head, tags, el("h2", { id: "panel-title", class: "panel-title", dir: "auto", text: task.title }));
   const summary = taskTldr(task);
   if (summary) panel.append(el("p", { class: "tldr panel-tldr", dir: "auto", text: summary }));
@@ -1476,10 +1675,11 @@ function updateBoard() {
   }
   fillSelect("status-filter", statusOptions(), state.filters.status);
   fillSelect("priority-filter", priorityOptions(), state.filters.priority);
+  fillSelect("quadrant-filter", quadrantOptions(), state.filters.quadrant);
   syncPressed("view", state.view);
   syncPressed("group", state.groupBy);
   const groupBy = document.getElementById("group-by");
-  if (groupBy) groupBy.hidden = state.view === "manager";
+  if (groupBy) groupBy.hidden = state.view === "manager" || state.view === "eisenhower";
   const managerLabel = document.getElementById("manager-group-label");
   if (managerLabel) managerLabel.hidden = state.view !== "manager";
   updateThemeButton();
@@ -1546,8 +1746,11 @@ function renderToolbar() {
   menuWrap.append(projectButton, el("div", { id: "project-menu", class: "menu", hidden: "hidden" }));
   bar.append(menuWrap);
 
-  ["status-filter", "priority-filter"].forEach((id) => {
-    const label = id === "status-filter" ? "Status" : "Priority";
+  [
+    ["status-filter", "Status"],
+    ["priority-filter", "Priority"],
+    ["quadrant-filter", "Quadrant"],
+  ].forEach(([id, label]) => {
     const wrap = el("label", { class: "select-wrap" });
     wrap.append(el("span", { class: "sr-only", text: label }));
     wrap.append(el("select", { id, "aria-label": label }));
@@ -1576,10 +1779,10 @@ function renderBoardShell() {
   const left = el("div", { class: "top-left" });
   left.append(brandLockup(), el("p", { id: "last-updated", class: "updated", text: "Last updated —" }));
   const actions = el("div", { class: "top-actions" });
-  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"]], state.view));
+  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"], ["eisenhower", "Eisenhower"]], state.view));
   const groupSeg = segment("group", [["status", "Status"], ["project", "Project"]], state.groupBy, "Group by");
   groupSeg.id = "group-by";
-  if (state.view === "manager") groupSeg.hidden = true;
+  if (state.view === "manager" || state.view === "eisenhower") groupSeg.hidden = true;
   const managerLabel = el("span", { id: "manager-group-label", class: "segment-label", text: "Grouped by project" });
   if (state.view !== "manager") managerLabel.hidden = true;
   actions.append(groupSeg, managerLabel);
@@ -1994,7 +2197,7 @@ function onClick(event) {
     syncUrl();
     updateThemeButton();
   } else if (action === "view") {
-    const nextView = button.dataset.value === "kanban" ? "kanban" : button.dataset.value === "manager" ? "manager" : "table";
+    const nextView = normalizeView(button.dataset.value);
     if (nextView === state.view) return;
     const prevGroup = currentGroupBy();
     state.view = nextView;
@@ -2033,8 +2236,15 @@ function onClick(event) {
     copyAgenda();
   } else if (action === "close-panel") {
     closePanel();
+  } else if (action === "sort") {
+    const key = button.dataset.key;
+    if (!TABLE_COLUMNS.some((column) => column.key === key)) return;
+    if (state.sort.key === key) state.sort.dir = state.sort.dir === "asc" ? "desc" : "asc";
+    else state.sort = { key, dir: "asc" };
+    updateBoard();
+    document.querySelector(`.sort-btn[data-key="${cssEscape(key)}"]`)?.focus();
   } else if (action === "clear-filters") {
-    state.filters = { q: "", projects: [], status: "", priority: "", hideDone: state.filters.hideDone };
+    state.filters = { q: "", projects: [], status: "", priority: "", quadrant: "", hideDone: state.filters.hideDone };
     state.projectMenuOpen = false;
     syncUrl();
     updateBoard();
@@ -2085,6 +2295,7 @@ function onInput(event) {
 function onChange(event) {
   if (event.target.id === "status-filter") state.filters.status = event.target.value;
   else if (event.target.id === "priority-filter") state.filters.priority = event.target.value;
+  else if (event.target.id === "quadrant-filter") state.filters.quadrant = cleanQuadrantFilter(event.target.value);
   else return;
   syncUrl();
   updateBoard();

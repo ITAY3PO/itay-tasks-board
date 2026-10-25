@@ -73,9 +73,10 @@ Then open `http://localhost:8000/?demo=1`. Fetching `demo-tasks.json` needs a lo
 
 Optional per-task fields may be missing on any task:
 
-- `tldr`: short string. The manager view uses it, and falls back to the first sentence of `notes`.
+- `tldr`: short string. The manager view and the Eisenhower cards use it, and fall back to the first sentence of `notes`.
 - `linear`: array of `{ id, url? }`. A missing `url` becomes `https://linear.app/issue/<id>`. Ids shaped like `SOLV-1687` in the title, notes, or source are linked the same way.
 - `scheduled`: `{ start, end }` ISO datetimes. A slot that falls today is pinned on the daily agenda.
+- `quadrant`: `Q1`, `Q2`, `Q3`, or `Q4`. Missing means Unsorted. Q1 is Do (urgent and important), Q2 is Schedule (important, not urgent), Q3 is Delegate (urgent, not important), and Q4 is Drop (neither). `priority` is unchanged.
 
 An optional `calendar.json` may sit next to `tasks.json`:
 
@@ -95,13 +96,15 @@ Every entry in `busy` is treated as busy, including pending or tentative invites
 
 ## Views
 
-Table and Kanban stay as they were. **Manager** is a third view: compact rows (name, TLDR, due, priority, project, Linear chips) grouped by project. Project groups are collapsible, follow the `projects` array, and show a count. Done tasks are hidden until **Hide done** is turned off. The table and Kanban can group by project the same way.
+Table and Kanban stay as they were. **Manager** is a third view: compact rows (name, TLDR, due, priority, project, Linear chips) grouped by project, with a quadrant badge such as "Q1 Do". Project groups are collapsible, follow the `projects` array, and show a count. Done tasks are hidden until **Hide done** is turned off. The table and Kanban can group by project the same way. The table has a Quadrant column, and every column header sorts its group.
 
-**Daily agenda** places open tasks into the remaining workday. Each task is 30 minutes, ordered by the `priorities` array, then due date, then `created`. Busy time and pinned `scheduled` slots are skipped. Anything left over is listed under "Didn't fit today". **Copy agenda** puts that plan on the clipboard as plain text.
+**Eisenhower** is a fourth view. It is a 2×2 grid: Q1 Do, Q2 Schedule, Q3 Delegate, and Q4 Drop. Each cell has a short subtitle, a count, and task cards. Tasks with no quadrant sit in an Unsorted strip under the grid. On a narrow screen the cells stack in that order. The same filters, including quadrant, and **Hide done** apply.
+
+**Daily agenda** places open tasks into the remaining workday. Each task is 30 minutes. Candidates are ordered Q1, then Q2, then Q3, then tasks with no quadrant. Inside each group the order is the `priorities` array, then due date (earlier first, no date last), then `created`. Q4 tasks are left out. Busy time and pinned `scheduled` slots are skipped. Anything left over is listed under "Didn't fit today". **Copy agenda** puts that plan on the clipboard as plain text.
 
 `demo-tasks.json` and `demo-calendar.json` are fictional. Dates anchored on 2026-10-25 are shifted to the current Asia/Jerusalem day when you open `?demo=1`, so the sample meetings stay on "today".
 
-Filters (project, status, priority, hide done, and text search) are kept in the URL and in `localStorage`. Hebrew task text uses `dir="auto"` so it lays out correctly inside the English UI.
+Filters (project, status, priority, quadrant, hide done, and text search) are kept in the URL and in `localStorage`. Hebrew task text uses `dir="auto"` so it lays out correctly inside the English UI.
 
 ## Tests
 

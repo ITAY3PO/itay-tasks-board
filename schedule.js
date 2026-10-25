@@ -152,7 +152,30 @@
     return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
   }
 
+  const QUADRANT_LABEL = {
+    Q1: "Q1 Do",
+    Q2: "Q2 Schedule",
+    Q3: "Q3 Delegate",
+    Q4: "Q4 Drop",
+  };
+
+  function quadrantKey(task) {
+    const value = String((task && task.quadrant) || "").trim().toUpperCase();
+    return Object.prototype.hasOwnProperty.call(QUADRANT_LABEL, value) ? value : "";
+  }
+
+  // Q1, then Q2, then Q3, then no quadrant. Q4 is not scheduled.
+  function agendaQuadrantRank(task) {
+    const key = quadrantKey(task);
+    if (key === "Q1") return 0;
+    if (key === "Q2") return 1;
+    if (key === "Q3") return 2;
+    return 3;
+  }
+
   function compareAgendaTasks(a, b, priorities) {
+    const byQuadrant = agendaQuadrantRank(a) - agendaQuadrantRank(b);
+    if (byQuadrant) return byQuadrant;
     const byPriority = priorityIndex(a.priority, priorities) - priorityIndex(b.priority, priorities);
     if (byPriority) return byPriority;
     const byDue = dueValue(a) - dueValue(b);
@@ -211,7 +234,7 @@
 
     const priorities = Array.isArray(source.priorities) ? source.priorities : [];
     const tasks = Array.isArray(source.tasks) ? source.tasks.filter((task) => task && typeof task === "object") : [];
-    const open = tasks.filter((task) => task.status !== "done");
+    const open = tasks.filter((task) => task.status !== "done" && quadrantKey(task) !== "Q4");
     const sorted = open.slice().sort((a, b) => compareAgendaTasks(a, b, priorities));
 
     const pins = [];
@@ -342,7 +365,7 @@
         return;
       }
       const task = item.task || {};
-      const bits = [task.project, task.priority].filter(Boolean);
+      const bits = [QUADRANT_LABEL[quadrantKey(task)] || "", task.project, task.priority].filter(Boolean);
       const suffix = bits.length ? ` — ${bits.join(" · ")}` : "";
       const pinned = item.pinned ? " (scheduled)" : "";
       lines.push(`${item.startLabel}-${item.endLabel}  ${task.title || item.title || "Untitled task"}${suffix}${pinned}`);
@@ -353,7 +376,9 @@
     else {
       agenda.overflow.forEach((task) => {
         const project = task.project ? ` (${task.project})` : "";
-        lines.push(`- ${task.title || "Untitled task"}${project}`);
+        const label = QUADRANT_LABEL[quadrantKey(task)] || "";
+        const quad = label ? ` — ${label}` : "";
+        lines.push(`- ${task.title || "Untitled task"}${project}${quad}`);
       });
     }
     return lines.join("\n");
@@ -395,5 +420,6 @@
     collectLinearLinks,
     formatZonedDate,
     zonedDateTime,
+    quadrantKey,
   };
 });
