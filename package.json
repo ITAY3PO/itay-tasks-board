@@ -1,0 +1,7 @@
+{
+  "name": "itay-tasks-board",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

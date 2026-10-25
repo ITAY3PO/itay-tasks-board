@@ -71,4 +71,44 @@ Then open `http://localhost:8000/?demo=1`. Fetching `demo-tasks.json` needs a lo
 
 `due` is `YYYY-MM-DD` or `null`. `waiting_on` is a string or `null`. Missing or unknown fields are shown neutrally; they do not break the page.
 
+Optional per-task fields may be missing on any task:
+
+- `tldr`: short string. The manager view uses it, and falls back to the first sentence of `notes`.
+- `linear`: array of `{ id, url? }`. A missing `url` becomes `https://linear.app/issue/<id>`. Ids shaped like `SOLV-1687` in the title, notes, or source are linked the same way.
+- `scheduled`: `{ start, end }` ISO datetimes. A slot that falls today is pinned on the daily agenda.
+
+An optional `calendar.json` may sit next to `tasks.json`:
+
+```json
+{
+  "date": "2026-10-25",
+  "timezone": "Asia/Jerusalem",
+  "workday": { "start": "09:00", "end": "19:00" },
+  "busy": [{ "start": "2026-10-25T10:00:00+02:00", "end": "2026-10-25T10:45:00+02:00", "title": "Standup" }],
+  "updated": "2026-10-25T06:30:00Z"
+}
+```
+
+The board fetches it with the same read-only token. A missing file or a `404` is normal. If the file is missing or its `date` is not today in that timezone, the agenda says "Calendar not loaded, meetings not excluded" and still builds a schedule. With no calendar, the workday is 09:00–19:00 Asia/Jerusalem, Sunday through Thursday. Friday and Saturday show "Not a workday" and can still be scheduled. A calendar dated today can replace the workday hours and contributes busy blocks, which the agenda shows as meetings.
+
+Every entry in `busy` is treated as busy, including pending or tentative invites that were already written into that list. A block that starts before the workday or runs past it is clipped to the workday (an 08:00 start becomes 09:00 when the workday starts then). `title` may be any string; the agenda shows it as a single line of text.
+
+## Views
+
+Table and Kanban stay as they were. **Manager** is a third view: compact rows (name, TLDR, due, priority, project, Linear chips) grouped by project. Project groups are collapsible, follow the `projects` array, and show a count. Done tasks are hidden until **Hide done** is turned off. The table and Kanban can group by project the same way.
+
+**Daily agenda** places open tasks into the remaining workday. Each task is 30 minutes, ordered by the `priorities` array, then due date, then `created`. Busy time and pinned `scheduled` slots are skipped. Anything left over is listed under "Didn't fit today". **Copy agenda** puts that plan on the clipboard as plain text.
+
+`demo-tasks.json` and `demo-calendar.json` are fictional. Dates anchored on 2026-10-25 are shifted to the current Asia/Jerusalem day when you open `?demo=1`, so the sample meetings stay on "today".
+
 Filters (project, status, priority, hide done, and text search) are kept in the URL and in `localStorage`. Hebrew task text uses `dir="auto"` so it lays out correctly inside the English UI.
+
+## Tests
+
+Scheduling is a pure function in `schedule.js`. From this directory:
+
+```bash
+node --test
+```
+
+There is no site build step. GitHub Pages still serves the root files as-is.
