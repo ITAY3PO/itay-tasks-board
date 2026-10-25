@@ -31,6 +31,7 @@ function task(partial) {
     source: partial.source || "",
     linear: partial.linear,
     scheduled: partial.scheduled || null,
+    quadrant: partial.quadrant,
   };
 }
 
@@ -312,7 +313,7 @@ test("Sunday through Thursday stay workdays", () => {
   }
 });
 
-test("open tasks are ordered by priority, then due, then created", () => {
+test("open tasks with no quadrant are ordered by priority, then due, then created", () => {
   const day = "2026-10-27";
   const agenda = buildAgenda({
     now: at(day, "09:00"),
@@ -384,6 +385,104 @@ test("the demo calendar clips 08:00 and keeps every busy title", () => {
     ],
   );
   assert.equal(agenda.items.find((item) => item.id === "a").startLabel, "09:20");
+});
+
+test("agenda orders Q1, then Q2, then Q3, then unsorted, and leaves Q4 out", () => {
+  const day = "2026-10-27";
+  const agenda = buildAgenda({
+    now: at(day, "09:00"),
+    timezone: TZ,
+    priorities: PRIORITIES,
+    calendar: { date: day, timezone: TZ, workday: { start: "09:00", end: "14:00" }, busy: [] },
+    tasks: [
+      task({ id: "q4", title: "Drop this", priority: "urgent", due: "2026-10-01", created: "2026-09-01", quadrant: "Q4" }),
+      task({
+        id: "q4-pin",
+        title: "Pinned drop",
+        priority: "urgent",
+        due: "2026-10-01",
+        created: "2026-09-01",
+        quadrant: "Q4",
+        scheduled: { start: at(day, "09:00").toISOString(), end: at(day, "09:30").toISOString() },
+      }),
+      task({ id: "done", title: "Finished Q1", status: "done", priority: "urgent", due: "2026-10-01", quadrant: "Q1" }),
+      task({ id: "unsorted-low", title: "Unsorted low", priority: "low", due: "2026-10-01", created: "2026-10-01", quadrant: "nope" }),
+      task({ id: "unsorted-later", title: "Unsorted later", priority: "urgent", due: "2026-10-20", created: "2026-10-02", quadrant: " " }),
+      task({ id: "unsorted-soon", title: "Unsorted soon", priority: "urgent", due: "2026-10-02", created: "2026-10-04" }),
+      task({ id: "q3-nodue", title: "Q3 no due", priority: "high", due: null, created: "2026-10-01", quadrant: "Q3" }),
+      task({ id: "q3-later", title: "Q3 later", priority: "urgent", due: "2026-10-19", created: "2026-10-01", quadrant: "Q3" }),
+      task({ id: "q3-sooner", title: "Q3 sooner", priority: "urgent", due: "2026-10-18", created: "2026-10-08", quadrant: "q3" }),
+      task({ id: "q2", title: "Q2 later", priority: "low", due: "2026-11-01", created: "2026-10-01", quadrant: "Q2" }),
+      task({ id: "q1-medium", title: "Q1 medium", priority: "medium", due: "2026-10-01", created: "2026-10-03", quadrant: "Q1" }),
+      task({ id: "q1-high-newer", title: "Q1 newer", priority: "high", due: "2026-10-19", created: "2026-10-05", quadrant: "Q1" }),
+      task({ id: "q1-high-older", title: "Q1 older", priority: "high", due: "2026-10-19", created: "2026-10-02", quadrant: "Q1" }),
+      task({ id: "q1-urgent-none", title: "Q1 no due", priority: "urgent", due: null, created: "2026-10-01", quadrant: "Q1" }),
+      task({ id: "q1-urgent-due", title: "Q1 due", priority: "urgent", due: "2026-10-21", created: "2026-10-08", quadrant: "Q1" }),
+    ],
+  });
+
+  assert.deepEqual(
+    agenda.items.map((item) => item.id),
+    [
+      "q1-urgent-due",
+      "q1-urgent-none",
+      "q1-high-older",
+      "q1-high-newer",
+      "q1-medium",
+      "q2",
+      "q3-sooner",
+      "q3-later",
+      "q3-nodue",
+      "unsorted-soon",
+    ],
+  );
+  assert.deepEqual(agenda.overflow.map((item) => item.id), ["unsorted-later", "unsorted-low"]);
+  assert.equal(agenda.items.some((item) => item.id === "q4" || item.id === "q4-pin" || item.id === "done"), false);
+  assert.equal(agenda.overflow.some((item) => item.id === "q4" || item.id === "q4-pin" || item.id === "done"), false);
+  const text = formatAgendaText(agenda);
+  assert.match(text, /09:00-09:30  Q1 due — Q1 Do · Personal · urgent/);
+  assert.match(text, /Didn't fit today\n- Unsorted later \(Personal\)/);
+  assert.equal(text.includes("Drop this"), false);
+  assert.equal(text.includes("Pinned drop"), false);
+});
+
+test("a scheduled slot still pins while Q4 stays off the agenda", () => {
+  const day = "2026-10-25";
+  const agenda = buildAgenda({
+    now: at(day, "08:30"),
+    timezone: TZ,
+    priorities: PRIORITIES,
+    calendar: { date: day, timezone: TZ, workday: { start: "09:00", end: "11:00" }, busy: [] },
+    tasks: [
+      task({
+        id: "q4-pin",
+        title: "Drop the pinned errand",
+        priority: "urgent",
+        quadrant: "Q4",
+        scheduled: { start: at(day, "09:00").toISOString(), end: at(day, "09:30").toISOString() },
+      }),
+      task({
+        id: "q3-pin",
+        title: "Delegated review",
+        priority: "low",
+        quadrant: "Q3",
+        scheduled: { start: at(day, "09:30").toISOString(), end: at(day, "10:00").toISOString() },
+      }),
+      task({ id: "q1", title: "Do this first", priority: "medium", quadrant: "Q1", due: "2026-10-20" }),
+      task({ id: "q2", title: "Schedule this", priority: "urgent", quadrant: "Q2", due: "2026-10-18" }),
+      task({ id: "loose", title: "No quadrant", priority: "urgent", due: "2026-10-01" }),
+    ],
+  });
+
+  assert.deepEqual(labels(agenda), [
+    "09:00-09:30 Do this first",
+    "09:30-10:00 pin Delegated review",
+    "10:00-10:30 Schedule this",
+    "10:30-11:00 No quadrant",
+  ]);
+  assert.equal(agenda.items.some((item) => item.id === "q4-pin"), false);
+  assert.equal(agenda.overflow.some((item) => item.id === "q4-pin"), false);
+  assert.equal(agenda.overflow.length, 0);
 });
 
 test("Linear ids come from the field and from title, notes, and source", () => {
