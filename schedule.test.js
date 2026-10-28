@@ -6,6 +6,9 @@ const {
   buildAgenda,
   formatAgendaText,
   collectLinearLinks,
+  subtaskLinks,
+  formatSubtaskProgress,
+  groupNested,
   zonedDateTime,
   CALENDAR_NOTE,
   NOT_WORKDAY_NOTE,
@@ -32,6 +35,7 @@ function task(partial) {
     linear: partial.linear,
     scheduled: partial.scheduled || null,
     quadrant: partial.quadrant,
+    parent: partial.parent,
   };
 }
 
@@ -503,4 +507,227 @@ test("Linear ids come from the field and from title, notes, and source", () => {
     { id: "POL-89", url: "https://linear.app/issue/POL-89" },
   ]);
   assert.deepEqual(collectLinearLinks({ title: "No ticket here", notes: "", source: "" }), []);
+});
+
+function idsOf(rows) {
+  return rows.map((row) => `${row.task.id}:${row.depth}`);
+}
+
+test("tasks without a parent, and tasks whose parent id does not exist, stay top-level", () => {
+  const tasks = [
+    task({ id: "a", title: "Alpha" }),
+    task({ id: "b", title: "Beta", parent: "" }),
+    task({ id: "c", title: "Gamma", parent: "   " }),
+    task({ id: "d", title: "Delta", parent: "t071" }),
+    task({ id: "e", title: "Epsilon", parent: "e" }),
+    task({ id: "f", title: "Phi", parent: "  missing  " }),
+  ];
+  const links = subtaskLinks(tasks);
+  assert.deepEqual(links.parentOf, {});
+  assert.deepEqual(links.children, {});
+  assert.deepEqual(links.progress, {});
+
+  const groups = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: () => "todo",
+    groupOrder: ["todo"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  assert.deepEqual(groups.map(([key]) => key), ["todo"]);
+  assert.deepEqual(idsOf(groups[0][1]), ["a:0", "b:0", "d:0", "e:0", "c:0", "f:0"]);
+});
+
+test("subtasks nest under a real parent with an N/M done count", () => {
+  const tasks = [
+    task({ id: "p", title: "Parent", status: "todo" }),
+    task({ id: "s1", title: "Second", status: "todo", parent: "p" }),
+    task({ id: "s2", title: "First", status: "done", parent: " p " }),
+    task({ id: "other", title: "Other", status: "todo" }),
+  ];
+  const links = subtaskLinks(tasks);
+  assert.equal(links.parentOf.s1, "p");
+  assert.equal(links.parentOf.s2, "p");
+  assert.equal(links.parentOf.other, undefined);
+  assert.deepEqual(links.children.p, ["s1", "s2"]);
+  assert.deepEqual(links.progress.p, { done: 1, total: 2 });
+  assert.equal(links.progress.s1, undefined);
+
+  const groups = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: (item) => item.status,
+    groupOrder: ["todo", "done"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  const byKey = Object.fromEntries(groups);
+  assert.deepEqual(idsOf(byKey.todo), ["other:0", "p:0", "s2:1", "s1:1"]);
+  assert.equal(byKey.done, undefined);
+});
+
+test("a subtask moves into its parent's group, and a hidden parent leaves it in place", () => {
+  const tasks = [
+    task({ id: "p", title: "Parent", status: "in_progress", project: "UMI" }),
+    task({ id: "child", title: "Child", status: "todo", project: "Personal", parent: "p" }),
+    task({ id: "solo", title: "Solo", status: "todo", project: "Personal" }),
+  ];
+  const nested = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: (item) => item.status,
+    groupOrder: ["todo", "in_progress"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  const byStatus = Object.fromEntries(nested);
+  assert.deepEqual(idsOf(byStatus.todo), ["solo:0"]);
+  assert.deepEqual(idsOf(byStatus.in_progress), ["p:0", "child:1"]);
+
+  const parentHidden = groupNested({
+    tasks,
+    visible: tasks.filter((item) => item.id !== "p"),
+    groupOf: (item) => item.status,
+    groupOrder: ["todo", "in_progress"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  const hidden = Object.fromEntries(parentHidden);
+  assert.deepEqual(idsOf(hidden.todo), ["child:0", "solo:0"]);
+  assert.equal(hidden.in_progress, undefined);
+  assert.deepEqual(subtaskLinks(tasks).progress.p, { done: 0, total: 1 });
+});
+
+test("hidden subtasks still count toward N/M, and grandchildren nest one level deeper", () => {
+  const tasks = [
+    task({ id: "p", title: "Parent", status: "todo" }),
+    task({ id: "done-child", title: "Done child", status: "done", parent: "p" }),
+    task({ id: "mid", title: "Middle", status: "todo", parent: "p" }),
+    task({ id: "leaf", title: "Leaf", status: "todo", parent: "mid" }),
+  ];
+  const links = subtaskLinks(tasks);
+  assert.deepEqual(links.progress.p, { done: 1, total: 2 });
+  assert.deepEqual(links.progress.mid, { done: 0, total: 1 });
+
+  const visible = tasks.filter((item) => item.status !== "done");
+  const groups = groupNested({
+    tasks,
+    visible,
+    groupOf: () => "open",
+    groupOrder: ["open"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  assert.deepEqual(idsOf(groups[0][1]), ["p:0", "mid:1", "leaf:2"]);
+});
+
+test("a parent cycle stays visible as top-level tasks", () => {
+  const tasks = [
+    task({ id: "a", title: "A", parent: "b" }),
+    task({ id: "b", title: "B", parent: "c" }),
+    task({ id: "c", title: "C", parent: "b" }),
+    task({ id: "plain", title: "Plain" }),
+  ];
+  const links = subtaskLinks(tasks);
+  assert.deepEqual(links.parentOf, {});
+  const groups = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: () => "all",
+    groupOrder: ["all"],
+    compare: (a, b) => a.id.localeCompare(b.id),
+  });
+  assert.deepEqual(idsOf(groups[0][1]), ["a:0", "b:0", "c:0", "plain:0"]);
+});
+
+test("a valid chain nests under the top parent, including across groups", () => {
+  const tasks = [
+    task({ id: "top", title: "Top", status: "todo" }),
+    task({ id: "mid", title: "Mid", status: "waiting", parent: "top" }),
+    task({ id: "leaf", title: "Leaf", status: "in_progress", parent: "mid" }),
+  ];
+  const links = subtaskLinks(tasks);
+  assert.equal(links.parentOf.mid, "top");
+  assert.equal(links.parentOf.leaf, "mid");
+  assert.deepEqual(links.progress.top, { done: 0, total: 1 });
+  const groups = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: (item) => item.status,
+    groupOrder: ["todo", "waiting", "in_progress"],
+    compare: (a, b) => a.title.localeCompare(b.title),
+  });
+  assert.deepEqual(groups.map(([key]) => key), ["todo"]);
+  assert.deepEqual(idsOf(groups[0][1]), ["top:0", "mid:1", "leaf:2"]);
+});
+
+test("t072 through t083 nest under t071 and the parent progress is done/total", () => {
+  const tasks = [task({ id: "t071", title: "Picnic", status: "in_progress", project: "UMI" })];
+  for (let n = 72; n <= 83; n += 1) {
+    const id = `t${String(n).padStart(3, "0")}`;
+    tasks.push(task({
+      id,
+      title: `Step ${n}`,
+      status: n <= 74 ? "done" : n % 2 === 0 ? "todo" : "in_progress",
+      parent: "t071",
+      project: n === 80 ? "Personal" : "UMI",
+    }));
+  }
+  tasks.push(task({ id: "solo", title: "No parent", status: "todo" }));
+  tasks.push(task({ id: "orphan", title: "Missing parent", status: "todo", parent: "t000" }));
+
+  const links = subtaskLinks(tasks);
+  for (let n = 72; n <= 83; n += 1) {
+    assert.equal(links.parentOf[`t${String(n).padStart(3, "0")}`], "t071");
+  }
+  assert.equal(links.parentOf.solo, undefined);
+  assert.equal(links.parentOf.orphan, undefined);
+  assert.equal(links.parentOf.t071, undefined);
+  assert.deepEqual(links.children.t071, tasks.filter((item) => item.parent === "t071").map((item) => item.id));
+  assert.deepEqual(links.progress.t071, { done: 3, total: 12 });
+  assert.equal(formatSubtaskProgress(links.progress.t071), "3/12");
+
+  const groups = groupNested({
+    tasks,
+    visible: tasks,
+    groupOf: (item) => item.project,
+    groupOrder: ["UMI", "Personal"],
+    compare: (a, b) => a.id.localeCompare(b.id),
+  });
+  const byProject = Object.fromEntries(groups);
+  const childRows = [];
+  for (let n = 72; n <= 83; n += 1) childRows.push(`t${String(n).padStart(3, "0")}:1`);
+  assert.deepEqual(idsOf(byProject.UMI), ["t071:0", ...childRows]);
+  assert.deepEqual(idsOf(byProject.Personal), ["orphan:0", "solo:0"]);
+});
+
+test("demo tasks parent t072–t083 on t071", () => {
+  const demo = require("./demo-tasks.json");
+  const links = subtaskLinks(demo.tasks);
+  const children = [];
+  for (let n = 72; n <= 83; n += 1) children.push(`t${String(n).padStart(3, "0")}`);
+  assert.deepEqual(links.children.t071, children);
+  children.forEach((id) => assert.equal(links.parentOf[id], "t071"));
+  assert.equal(links.parentOf.t071, undefined);
+  assert.equal(formatSubtaskProgress(links.progress.t071), "3/12");
+  const orphan = demo.tasks.find((item) => item.id === "d23");
+  assert.equal(orphan.parent, "t000");
+  assert.equal(links.parentOf.d23, undefined);
+});
+
+test("agenda still schedules a subtask as a normal open task", () => {
+  const day = "2026-10-25";
+  const agenda = buildAgenda({
+    now: at(day, "09:00"),
+    timezone: TZ,
+    priorities: PRIORITIES,
+    calendar: {
+      date: day,
+      timezone: TZ,
+      workday: { start: "09:00", end: "12:00" },
+      busy: [],
+    },
+    tasks: [
+      task({ id: "parent", title: "Parent", priority: "low", quadrant: "Q4" }),
+      task({ id: "child", title: "Child task", priority: "urgent", parent: "parent", quadrant: "Q1" }),
+    ],
+  });
+  assert.deepEqual(labels(agenda), ["09:00-09:30 Child task"]);
+  assert.deepEqual(agenda.overflow.map((item) => item.id), []);
 });

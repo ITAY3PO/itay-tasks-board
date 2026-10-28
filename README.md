@@ -77,6 +77,7 @@ Optional per-task fields may be missing on any task:
 - `linear`: array of `{ id, url? }`. A missing `url` becomes `https://linear.app/issue/<id>`. Ids shaped like `SOLV-1687` in the title, notes, or source are linked the same way.
 - `scheduled`: `{ start, end }` ISO datetimes. A slot that falls today is pinned on the daily agenda.
 - `quadrant`: `Q1`, `Q2`, `Q3`, or `Q4`. Missing means Unsorted. Q1 is Do (urgent and important), Q2 is Schedule (important, not urgent), Q3 is Delegate (urgent, not important), and Q4 is Drop (neither). `priority` is unchanged.
+- `parent`: id of another task, for example `t071`. When that id matches a task in the file, this task is a subtask of it. A missing value, a blank value, or an id that is not in the file leaves the task as a top-level task.
 
 An optional `calendar.json` may sit next to `tasks.json`:
 
@@ -99,6 +100,8 @@ Every entry in `busy` is treated as busy, including pending or tentative invites
 Table and Kanban stay as they were. **Manager** is a third view: compact rows (name, TLDR, due, priority, project, Linear chips) grouped by project, with a quadrant badge such as "Q1 Do". Project groups are collapsible, follow the `projects` array, and show a count. Done tasks are hidden until **Hide done** is turned off. The table and Kanban can group by project the same way. The table has a Quadrant column, and every column header sorts its group.
 
 **Eisenhower** is a fourth view. It is a 2×2 grid: Q1 Do, Q2 Schedule, Q3 Delegate, and Q4 Drop. Each cell has a short subtitle, a count, and task cards. Tasks with no quadrant sit in an Unsorted strip under the grid. On a narrow screen the cells stack in that order. The same filters, including quadrant, and **Hide done** apply.
+
+Subtasks indent under their parent in the Table, Kanban, and Manager views. The parent shows a small `done/total` count for its direct subtasks, such as `3/12`. Each nested subtask shows its own status, with a read-only check when that status is done. Each subtask has a Parent chip that opens the parent. A subtask whose parent is hidden by the current filters stays in its own group, as a normal task, and still shows that chip. Eisenhower and the daily agenda keep listing subtasks as normal tasks in their quadrant or time slot, with the same Parent chip. A task with no parent, or with a parent id that is not in the file, is unchanged.
 
 **Daily agenda** places open tasks into the remaining workday. Each task is 30 minutes. Candidates are ordered Q1, then Q2, then Q3, then tasks with no quadrant. Inside each group the order is the `priorities` array, then due date (earlier first, no date last), then `created`. Q4 tasks are left out. Busy time and pinned `scheduled` slots are skipped. Anything left over is listed under "Didn't fit today". **Copy agenda** puts that plan on the clipboard as plain text.
 
