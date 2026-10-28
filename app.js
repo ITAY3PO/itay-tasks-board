@@ -11,6 +11,7 @@ const CONFIG = {
 
 const GITHUB_API_VERSION = "2022-11-28";
 const TOKEN_KEY = "itay-tasks.token";
+const WRITE_TOKEN_KEY = "itay-tasks.writeToken";
 const UI_KEY = "itay-tasks.ui";
 const TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
 
@@ -89,6 +90,11 @@ const state = {
   forgetArmed: false,
   forgetTimer: 0,
   liveMessage: "",
+  writeToken: "",
+  save: { status: "idle", message: "" },
+  connectOpen: false,
+  moveMenu: null,
+  editor: null,
 };
 
 let requestId = 0;
@@ -494,6 +500,7 @@ async function fetchRemote(token) {
   const path = CONFIG.path.split("/").map(encodeURIComponent).join("/");
   const url = new URL(`https://api.github.com/repos/${encodeURIComponent(CONFIG.owner)}/${encodeURIComponent(CONFIG.repo)}/contents/${path}`);
   url.searchParams.set("ref", CONFIG.branch);
+  assertGitHub(url.href);
   const response = await fetch(url.href, {
     cache: "no-store",
     headers: {
@@ -521,6 +528,7 @@ async function fetchCalendar(token) {
   const url = new URL(`https://api.github.com/repos/${encodeURIComponent(CONFIG.owner)}/${encodeURIComponent(CONFIG.repo)}/contents/calendar.json`);
   url.searchParams.set("ref", CONFIG.branch);
   try {
+    assertGitHub(url.href);
     const response = await fetch(url.href, {
       cache: "no-store",
       headers: {
@@ -534,6 +542,77 @@ async function fetchCalendar(token) {
   } catch {
     return null;
   }
+}
+
+// Separate from the raw read above. Editing needs the blob sha and the exact
+// file bytes so a patch can be applied to the latest copy.
+async function fetchTasksFile(token) {
+  const path = CONFIG.path.split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`https://api.github.com/repos/${encodeURIComponent(CONFIG.owner)}/${encodeURIComponent(CONFIG.repo)}/contents/${path}`);
+  url.searchParams.set("ref", CONFIG.branch);
+  assertGitHub(url.href);
+  const response = await fetch(url.href, {
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    },
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = await response.text();
+    } catch {
+      /* ignore */
+    }
+    const error = new Error("request failed");
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
+  }
+  const body = await response.json();
+  if (!body || typeof body.content !== "string" || typeof body.sha !== "string") {
+    const error = new Error("GitHub did not return tasks.json");
+    error.kind = "parse";
+    throw error;
+  }
+  return { sha: body.sha, text: globalThis.ItayEdit.decodeBase64Utf8(body.content) };
+}
+
+async function putTasksFile(token, payload) {
+  const path = CONFIG.path.split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`https://api.github.com/repos/${encodeURIComponent(CONFIG.owner)}/${encodeURIComponent(CONFIG.repo)}/contents/${path}`);
+  assertGitHub(url.href);
+  const response = await fetch(url.href, {
+    method: "PUT",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    },
+    body: JSON.stringify({
+      message: payload.message,
+      content: globalThis.ItayEdit.encodeBase64Utf8(payload.text),
+      sha: payload.sha,
+      branch: CONFIG.branch,
+    }),
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = await response.text();
+    } catch {
+      /* ignore */
+    }
+    const error = new Error("write failed");
+    error.status = response.status;
+    error.detail = scrubSecret(detail);
+    throw error;
+  }
+  return response.json().catch(() => ({}));
 }
 
 const FIXTURE_DAY = "2026-10-25";
@@ -612,6 +691,27 @@ function loadPrefs() {
     : null;
   state.collapsed = new Set(saved || (activeGroup === "status" ? ["done"] : []));
   state.token = storage.get(TOKEN_KEY) || "";
+  state.writeToken = storage.get(WRITE_TOKEN_KEY) || "";
+}
+
+function canEdit() {
+  return Boolean(state.demo || state.writeToken);
+}
+
+function assertGitHub(url) {
+  const parsed = new URL(url);
+  if (parsed.origin !== "https://api.github.com") {
+    const error = new Error("The token is only sent to api.github.com.");
+    error.kind = "network";
+    throw error;
+  }
+}
+
+function scrubSecret(text) {
+  return String(text || "")
+    .replace(/github_pat_[A-Za-z0-9_]+/g, "[token]")
+    .replace(/\bghp_[A-Za-z0-9]+\b/g, "[token]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [token]");
 }
 
 function syncUrl() {
@@ -1210,7 +1310,7 @@ function renderGroup(key, rows) {
 function renderCard(task, depth) {
   const nest = depth || 0;
   const parent = linkedParent(task);
-  const card = el("div", { class: `card${state.openTaskId === task.id ? " is-open" : ""}` });
+  const card = el("div", { class: `card${state.openTaskId === task.id ? " is-open" : ""}`, "data-task-id": task.id });
   if (nest > 0) {
     card.classList.add("is-subtask");
     card.style.setProperty("--nest", String(nest));
@@ -1218,6 +1318,8 @@ function renderCard(task, depth) {
   }
   if (parent) card.dataset.parentId = parent.id;
   setBar(card, statusMeta(task.status).bar);
+  const tools = cardTools(task, state.view === "kanban" && currentGroupBy() === "status" ? "status" : "");
+  if (tools) card.append(tools);
   const button = el("button", {
     type: "button",
     class: "card-open",
@@ -1317,6 +1419,8 @@ function renderMatrixCard(task) {
     "data-task-id": task.id,
   });
   if (parent) card.dataset.parentId = parent.id;
+  const tools = cardTools(task, "quadrant");
+  if (tools) card.append(tools);
   const button = el("button", {
     type: "button",
     class: "matrix-open",
@@ -1341,6 +1445,10 @@ function renderQuadCell(info, tasks) {
     class: `quad quad-${info.key.toLowerCase()}`,
     "data-quadrant": info.key,
   });
+  if (canEdit()) {
+    section.dataset.dropZone = "quadrant";
+    section.dataset.dropValue = info.key;
+  }
   const color = safeHex(info.color);
   section.style.setProperty("--q", color);
   section.style.setProperty("--q-ink", titleColor(color));
@@ -1368,8 +1476,12 @@ function renderEisenhower(tasks) {
   });
   board.append(matrix);
   const unsorted = tasks.filter((task) => !task.quadrant).sort(compareDefault);
-  if (!unsorted.length) return board;
+  if (!unsorted.length && !canEdit()) return board;
   const strip = el("section", { class: "unsorted", "data-quadrant": "unsorted" });
+  if (canEdit()) {
+    strip.dataset.dropZone = "quadrant";
+    strip.dataset.dropValue = "unsorted";
+  }
   const head = el("div", { class: "unsorted-head" });
   const titles = el("div", { class: "quad-titles" });
   titles.append(el("h2", { class: "quad-label", text: "Unsorted" }));
@@ -1379,7 +1491,8 @@ function renderEisenhower(tasks) {
   count.style.color = pillFg("#c4c4c4");
   head.append(titles, count);
   const grid = el("div", { class: "unsorted-grid" });
-  unsorted.forEach((task) => grid.append(renderMatrixCard(task)));
+  if (!unsorted.length) grid.append(el("p", { class: "quad-empty", text: "Drop a card here to clear its quadrant" }));
+  else unsorted.forEach((task) => grid.append(renderMatrixCard(task)));
   strip.append(head, grid);
   board.append(strip);
   return board;
@@ -1391,6 +1504,10 @@ function renderKanban(groups) {
     const meta = groupMeta(key);
     const collapsed = state.collapsed.has(key);
     const col = el("section", { class: `kanban-col${collapsed ? " is-collapsed" : ""}` });
+    if (canEdit() && currentGroupBy() === "status") {
+      col.dataset.dropZone = "status";
+      col.dataset.dropValue = key;
+    }
     setBar(col, meta.bar);
     const header = el("button", {
       type: "button",
@@ -1649,8 +1766,27 @@ function renderAgenda() {
 function renderPanel() {
   const host = document.getElementById("panel-root");
   if (!host) return;
+  document.body.classList.toggle("panel-open", Boolean(state.openTaskId || state.editor || state.agendaOpen));
+  if (canEdit() && state.openTaskId && (!state.editor || state.editor.mode !== "edit" || state.editor.id !== state.openTaskId)) {
+    const task = state.data && state.data.tasks.find((item) => item.id === state.openTaskId);
+    if (task) state.editor = { mode: "edit", id: task.id, draft: draftFromTask(task), error: "" };
+  }
+  if (!state.editor && !state.openTaskId) {
+    host.replaceChildren();
+    delete host.dataset.panelKey;
+    return;
+  }
+  const key = state.editor ? `form:${state.editor.mode}:${state.editor.id}` : `view:${state.openTaskId}:${state.dataVersion}`;
+  if (host.dataset.panelKey === key) {
+    updateEditorChrome();
+    return;
+  }
+  host.dataset.panelKey = key;
+  if (state.editor) {
+    host.replaceChildren(renderEditor());
+    return;
+  }
   host.replaceChildren();
-  document.body.classList.toggle("panel-open", Boolean(state.openTaskId || state.agendaOpen));
   if (!state.openTaskId) return;
   const task = state.data.tasks.find((item) => item.id === state.openTaskId);
   if (!task) return;
@@ -1698,7 +1834,7 @@ function renderPanel() {
   ].forEach(([label, value]) => {
     meta.append(el("dt", { text: label }), el("dd", { dir: "auto", text: value }));
   });
-  panel.append(meta, el("p", { class: "panel-foot", text: "Read-only. Edit this task in the private data repository." }));
+  panel.append(meta, el("p", { class: "panel-foot", text: "Read-only. Connect for editing to change this task." }));
   backdrop.append(panel);
   host.append(backdrop);
 }
@@ -1859,9 +1995,29 @@ function updateBoard() {
   renderInlineError();
   renderSummary();
   renderProjectMenu();
+  const connect = document.getElementById("connect-btn");
+  if (connect) {
+    connect.textContent = state.writeToken ? "Editing connected" : "Connect for editing";
+    connect.title = state.writeToken
+      ? "A write token is saved in this browser. Open to disconnect."
+      : "Paste a write token to edit tasks.";
+  }
+  const newTask = document.getElementById("new-task-btn");
+  if (newTask) newTask.hidden = !canEdit();
+  const hint = document.getElementById("edit-hint");
+  if (hint) hint.hidden = canEdit();
+  const footnote = document.getElementById("footnote");
+  if (footnote) {
+    if (state.demo) footnote.textContent = "Demo edits stay in this browser and are not written to GitHub.";
+    else if (state.writeToken) footnote.textContent = "Edits save to tasks.json in the private repository.";
+    else footnote.textContent = "Read-only. Connect for editing to drag cards or change a task.";
+  }
+  syncSaveStatus();
   renderBoardList();
   renderPanel();
   renderAgenda();
+  renderConnect();
+  if (state.moveMenu) placeMoveMenu(state.moveMenu.id);
 }
 
 function segment(action, options, current, label) {
@@ -1949,7 +2105,11 @@ function renderBoardShell() {
   const sticky = el("div", { class: "sticky-stack" });
   const top = el("header", { class: "topbar" });
   const left = el("div", { class: "top-left" });
-  left.append(brandLockup(), el("p", { id: "last-updated", class: "updated", text: "Last updated —" }));
+  left.append(
+    brandLockup(),
+    el("p", { id: "last-updated", class: "updated", text: "Last updated —" }),
+    el("p", { id: "save-status", class: "save-status", role: "status", hidden: "hidden" }),
+  );
   const actions = el("div", { class: "top-actions" });
   actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"], ["eisenhower", "Eisenhower"]], state.view));
   const groupSeg = segment("group", [["status", "Status"], ["project", "Project"]], state.groupBy, "Group by");
@@ -1959,6 +2119,16 @@ function renderBoardShell() {
   if (state.view !== "manager") managerLabel.hidden = true;
   actions.append(groupSeg, managerLabel);
   actions.append(el("button", { type: "button", id: "agenda-btn", class: "btn", "data-action": "open-agenda", text: "Daily agenda" }));
+  const newTask = el("button", { type: "button", id: "new-task-btn", class: "btn btn-primary", "data-action": "new-task", text: "New task" });
+  if (!canEdit()) newTask.hidden = true;
+  actions.append(newTask);
+  actions.append(el("button", {
+    type: "button",
+    id: "connect-btn",
+    class: "btn",
+    "data-action": "connect",
+    text: state.writeToken ? "Editing connected" : "Connect for editing",
+  }));
   actions.append(el("button", { type: "button", id: "theme-btn", class: "icon-btn", "data-action": "theme" }));
   const refresh = el("button", { type: "button", id: "refresh-btn", class: "btn", "data-action": "refresh" });
   refresh.append(icon("refresh"), document.createTextNode("Refresh"));
@@ -1976,7 +2146,7 @@ function renderBoardShell() {
   const banner = el("div", { id: "demo-banner", class: "banner" });
   const bannerText = el("p");
   bannerText.append(el("strong", { text: "Demo mode. " }));
-  bannerText.append(document.createTextNode("These tasks are fictional and live in this public repo so the layout can be reviewed. Nothing here is real work."));
+  bannerText.append(document.createTextNode("These tasks are fictional and live in this public repo so the layout can be reviewed. Nothing here is real work. Edits stay in this tab and are not written to GitHub."));
   banner.append(
     bannerText,
     el("button", { type: "button", class: "btn btn-small", "data-action": "leave-demo", text: "Leave demo" }),
@@ -1989,10 +2159,16 @@ function renderBoardShell() {
     el("div", { id: "warnings" }),
     el("div", { id: "inline-error", class: "inline-error", hidden: "hidden" }),
     renderToolbar(),
+    el("p", {
+      id: "edit-hint",
+      class: "edit-hint",
+      hidden: canEdit() ? "hidden" : null,
+      text: "Drag and edit stay off until you connect a write token.",
+    }),
     el("div", { id: "board-list" }),
-    el("p", { class: "footnote", text: "Read-only. Edit tasks in the private data repository." }),
+    el("p", { id: "footnote", class: "footnote", text: "Read-only. Connect for editing to drag cards or change a task." }),
   );
-  page.append(sticky, main, el("div", { id: "panel-root" }), el("div", { id: "agenda-root" }));
+  page.append(sticky, main, el("div", { id: "panel-root" }), el("div", { id: "agenda-root" }), el("div", { id: "dialog-root" }));
   return page;
 }
 
@@ -2094,6 +2270,9 @@ function renderError() {
     actions.append(el("button", { type: "button", class: "btn", "data-action": "reset-token", text: "Enter a different token" }));
   }
   if (!state.demo) actions.append(el("a", { href: "?demo=1", text: "Preview with demo data" }));
+  if (!state.demo && state.writeToken && !state.token) {
+    actions.append(el("button", { type: "button", class: "btn", "data-action": "disconnect", text: "Disconnect write token" }));
+  }
   card.append(actions);
   wrap.append(card);
   return wrap;
@@ -2123,8 +2302,8 @@ function render() {
 
 async function loadRemote() {
   const id = ++requestId;
-  const token = state.token || storage.get(TOKEN_KEY) || "";
-  state.token = token;
+  state.token = storage.get(TOKEN_KEY) || "";
+  const token = state.token || state.writeToken || "";
   if (!token) {
     state.mode = "setup";
     render();
@@ -2231,6 +2410,13 @@ function forgetToken(options = {}) {
     else render();
     return;
   }
+  if (state.writeToken) {
+    state.data = null;
+    state.openTaskId = null;
+    state.editor = null;
+    loadRemote();
+    return;
+  }
   state.data = null;
   state.mode = "setup";
   render();
@@ -2255,8 +2441,15 @@ function leaveDemo() {
 }
 
 function openTask(id) {
-  state.openTaskId = id;
   state.returnFocusId = id;
+  if (canEdit()) {
+    startEdit(id);
+    return;
+  }
+  state.editor = null;
+  state.openTaskId = id;
+  const host = document.getElementById("panel-root");
+  if (host) delete host.dataset.panelKey;
   updateBoard();
   document.querySelector("#panel [data-action='close-panel']")?.focus();
 }
@@ -2264,12 +2457,22 @@ function openTask(id) {
 function closePanel() {
   const id = state.returnFocusId;
   state.openTaskId = null;
+  state.editor = null;
+  const host = document.getElementById("panel-root");
+  if (host) delete host.dataset.panelKey;
   updateBoard();
-  if (id) document.querySelector(`[data-task-id="${cssEscape(id)}"]`)?.focus();
+  if (!id) return;
+  const node = document.querySelector(`[data-task-id="${cssEscape(id)}"]`);
+  if (!node) return;
+  if (node.matches("button, [tabindex]")) node.focus();
+  else node.querySelector("[data-action='open-task']")?.focus();
 }
 
 function openAgenda() {
   state.openTaskId = null;
+  state.editor = null;
+  const panel = document.getElementById("panel-root");
+  if (panel) delete panel.dataset.panelKey;
   state.agendaOpen = true;
   const host = document.getElementById("agenda-root");
   if (host) delete host.dataset.open;
@@ -2284,7 +2487,7 @@ function closeAgenda() {
     delete host.dataset.open;
     host.replaceChildren();
   }
-  document.body.classList.toggle("panel-open", Boolean(state.openTaskId));
+  document.body.classList.toggle("panel-open", Boolean(state.openTaskId || state.editor));
   document.getElementById("agenda-btn")?.focus();
 }
 
@@ -2343,6 +2546,10 @@ function trapFocus(event, container) {
 }
 
 function onClick(event) {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
   if (event.target.closest("a")) return;
   const button = event.target.closest("[data-action]");
   if (!button || !document.getElementById("app").contains(button)) return;
@@ -2451,6 +2658,51 @@ function onClick(event) {
     syncUrl();
     updateBoard();
     document.getElementById("search")?.focus();
+  } else if (action === "toggle-move") {
+    const id = button.dataset.id;
+    const kind = button.dataset.moveKind;
+    if (state.moveMenu && state.moveMenu.id === id && state.moveMenu.kind === kind) {
+      state.moveMenu = null;
+      moveMenuArmed = false;
+      updateBoard();
+      document.querySelector(`[data-action="toggle-move"][data-id="${cssEscape(id)}"]`)?.focus();
+    } else {
+      state.moveMenu = { id, kind };
+      moveMenuArmed = false;
+      updateBoard();
+      const menu = document.querySelector(`[data-move-menu="${cssEscape(id)}"]`);
+      placeMoveMenu(id);
+      menu?.querySelector("[role='menuitemradio']")?.focus();
+      window.setTimeout(() => {
+        moveMenuArmed = true;
+      }, 0);
+    }
+  } else if (action === "move-task") {
+    const id = button.dataset.id;
+    const kind = button.dataset.moveKind;
+    const value = button.dataset.value;
+    state.moveMenu = null;
+    moveMenuArmed = false;
+    commitDrop(id, kind, value);
+  } else if (action === "new-task") {
+    startCreate("");
+  } else if (action === "add-subtask") {
+    addSubtask();
+  } else if (action === "connect") {
+    state.connectOpen = true;
+    const host = document.getElementById("dialog-root");
+    if (host) delete host.dataset.open;
+    updateBoard();
+  } else if (action === "close-connect") {
+    state.connectOpen = false;
+    const host = document.getElementById("dialog-root");
+    if (host) delete host.dataset.open;
+    updateBoard();
+    document.getElementById("connect-btn")?.focus();
+  } else if (action === "disconnect") {
+    disconnectWrite();
+  } else if (action === "dismiss-save") {
+    setSaveStatus("idle", "");
   } else if (action === "dismiss-error") {
     state.inlineError = null;
     renderInlineError();
@@ -2458,6 +2710,10 @@ function onClick(event) {
 }
 
 function onInput(event) {
+  if (event.target.dataset && event.target.dataset.field && state.editor) {
+    state.editor.draft[event.target.dataset.field] = event.target.value;
+    return;
+  }
   if (event.target.id !== "search") return;
   state.filters.q = event.target.value;
   syncUrl();
@@ -2465,6 +2721,10 @@ function onInput(event) {
 }
 
 function onChange(event) {
+  if (event.target.dataset && event.target.dataset.field && state.editor) {
+    state.editor.draft[event.target.dataset.field] = event.target.value;
+    return;
+  }
   if (event.target.id === "status-filter") state.filters.status = event.target.value;
   else if (event.target.id === "priority-filter") state.filters.priority = event.target.value;
   else if (event.target.id === "quadrant-filter") state.filters.quadrant = cleanQuadrantFilter(event.target.value);
@@ -2474,6 +2734,16 @@ function onChange(event) {
 }
 
 function onSubmit(event) {
+  if (event.target.id === "task-form") {
+    event.preventDefault();
+    saveEditor();
+    return;
+  }
+  if (event.target.id === "write-token-form") {
+    event.preventDefault();
+    saveWriteToken(event.target);
+    return;
+  }
   if (event.target.id !== "token-form") return;
   event.preventDefault();
   const token = String(new FormData(event.target).get("token") || "").replace(/^Bearer\s+/i, "").trim();
@@ -2493,7 +2763,36 @@ function onSubmit(event) {
 }
 
 function onKeydown(event) {
+  if (state.moveMenu && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    const menu = document.querySelector(`[data-move-menu="${cssEscape(state.moveMenu.id)}"]`);
+    if (menu && menu.contains(document.activeElement)) {
+      const items = [...menu.querySelectorAll("[role='menuitemradio']")];
+      const index = Math.max(0, items.indexOf(document.activeElement));
+      const next = event.key === "ArrowDown"
+        ? items[(index + 1) % items.length]
+        : items[(index - 1 + items.length) % items.length];
+      event.preventDefault();
+      next?.focus();
+      return;
+    }
+  }
   if (event.key === "Escape") {
+    if (state.connectOpen) {
+      state.connectOpen = false;
+      const host = document.getElementById("dialog-root");
+      if (host) delete host.dataset.open;
+      updateBoard();
+      document.getElementById("connect-btn")?.focus();
+      return;
+    }
+    if (state.moveMenu) {
+      const id = state.moveMenu.id;
+      state.moveMenu = null;
+      moveMenuArmed = false;
+      updateBoard();
+      document.querySelector(`[data-action="toggle-move"][data-id="${cssEscape(id)}"]`)?.focus();
+      return;
+    }
     if (state.agendaOpen) {
       closeAgenda();
       return;
@@ -2504,11 +2803,17 @@ function onKeydown(event) {
       document.getElementById("project-btn")?.focus();
       return;
     }
-    if (state.openTaskId) closePanel();
+    if (state.openTaskId || state.editor) closePanel();
     return;
   }
   if (event.key === "Tab") {
-    const container = state.agendaOpen ? document.getElementById("agenda") : state.openTaskId ? document.getElementById("panel") : null;
+    const container = state.connectOpen
+      ? document.getElementById("connect-dialog")
+      : state.agendaOpen
+        ? document.getElementById("agenda")
+        : (state.openTaskId || state.editor)
+          ? document.getElementById("panel")
+          : null;
     if (container) trapFocus(event, container);
     if (container) return;
   }
@@ -2518,6 +2823,923 @@ function onKeydown(event) {
     event.preventDefault();
     openTask(row.dataset.id);
   }
+}
+
+let writeChain = Promise.resolve();
+let drag = null;
+let suppressClick = false;
+let moveMenuArmed = false;
+
+function draftFromTask(task) {
+  const edit = globalThis.ItayEdit;
+  const due = task.dueRaw && edit && edit.isValidDate(task.dueRaw) ? task.dueRaw : "";
+  return {
+    title: task.title || "",
+    notes: task.notes || "",
+    due,
+    status: task.status || "todo",
+    quadrant: task.quadrant || "",
+    project: task.project || "",
+    parent: task.parent || "",
+  };
+}
+
+function todayStamp() {
+  const zone = (state.calendar && state.calendar.timezone) || "Asia/Jerusalem";
+  try {
+    return globalThis.ItayBoard.formatZonedDate(new Date(), zone);
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function dragKindForView() {
+  if (!canEdit()) return "";
+  if (state.view === "eisenhower") return "quadrant";
+  if (state.view === "kanban" && currentGroupBy() === "status") return "status";
+  return "";
+}
+
+function cardTools(task, kind) {
+  if (!canEdit() || !kind) return null;
+  const bar = el("div", { class: "card-tools" });
+  const handle = el("button", {
+    type: "button",
+    class: "drag-handle",
+    "data-drag-handle": kind,
+    "aria-label": `Drag ${task.title}`,
+    title: "Drag to move",
+  });
+  handle.append(el("span", { class: "grip", "aria-hidden": "true" }));
+  const open = Boolean(state.moveMenu && state.moveMenu.id === task.id && state.moveMenu.kind === kind);
+  const move = el("button", {
+    type: "button",
+    class: "move-btn",
+    "data-action": "toggle-move",
+    "data-id": task.id,
+    "data-move-kind": kind,
+    "aria-haspopup": "menu",
+    "aria-expanded": String(open),
+    "aria-label": `Move ${task.title}`,
+    text: "Move",
+  });
+  bar.append(handle, move);
+  if (open) bar.append(renderMoveMenu(task, kind));
+  return bar;
+}
+
+function statusMoveOptions(task) {
+  const edit = globalThis.ItayEdit;
+  const known = edit ? edit.STATUSES : ["todo", "in_progress", "waiting", "done"];
+  const keys = [];
+  const listed = state.data.statuses.length ? state.data.statuses : known;
+  listed.forEach((key) => {
+    if (known.includes(key)) uniquePush(keys, key);
+  });
+  known.forEach((key) => uniquePush(keys, key));
+  return keys.map((key) => ({
+    value: key,
+    label: statusMeta(key).label,
+    current: task.status === key,
+  }));
+}
+
+function renderMoveMenu(task, kind) {
+  const menu = el("div", {
+    class: "move-menu",
+    role: "menu",
+    "data-move-menu": task.id,
+    "aria-label": kind === "quadrant" ? "Move to quadrant" : "Move to status",
+  });
+  const options = kind === "quadrant"
+    ? [
+      ...QUADRANTS.map((item) => ({
+        value: item.key,
+        label: `${item.key} ${item.name}`,
+        current: task.quadrant === item.key,
+      })),
+      { value: "unsorted", label: "Unsorted", current: !task.quadrant },
+    ]
+    : statusMoveOptions(task);
+  options.forEach((option) => {
+    const item = el("button", {
+      type: "button",
+      class: "menu-item",
+      role: "menuitemradio",
+      "data-action": "move-task",
+      "data-id": task.id,
+      "data-move-kind": kind,
+      "data-value": option.value,
+      "aria-checked": String(Boolean(option.current)),
+      text: option.label,
+    });
+    menu.append(item);
+  });
+  return menu;
+}
+
+function placeMoveMenu(id) {
+  const menu = document.querySelector(`[data-move-menu="${cssEscape(id)}"]`);
+  const button = document.querySelector(`[data-action="toggle-move"][data-id="${cssEscape(id)}"]`);
+  if (!menu || !button) return;
+  const rect = button.getBoundingClientRect();
+  const width = 200;
+  menu.style.position = "fixed";
+  menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 12)}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+  menu.style.zIndex = "25";
+}
+
+function editorControl(label, control) {
+  const wrap = el("label", { class: "panel-field" });
+  wrap.append(el("span", { class: "field-label", text: label }));
+  wrap.append(control);
+  return wrap;
+}
+
+function fieldInput(label, name, type, value) {
+  const input = el("input", {
+    class: "editor-input",
+    id: name === "title" ? "task-title" : `task-${name}`,
+    type,
+    "data-field": name,
+    autocomplete: "off",
+  });
+  if (name === "title" || name === "notes") input.dir = "auto";
+  input.value = value || "";
+  if (name === "title") input.required = true;
+  return editorControl(label, input);
+}
+
+function fieldArea(label, name, value) {
+  const area = el("textarea", {
+    class: "editor-area",
+    id: `task-${name}`,
+    "data-field": name,
+    dir: "auto",
+  });
+  area.value = value || "";
+  return editorControl(label, area);
+}
+
+function fieldSelect(label, name, options, current) {
+  const select = el("select", { class: "editor-select", id: `task-${name}`, "data-field": name });
+  options.forEach((option) => {
+    const node = el("option", { value: option.value, text: option.label });
+    if (String(option.value) === String(current || "")) node.selected = true;
+    select.append(node);
+  });
+  if (current && ![...select.options].some((option) => option.value === current)) {
+    const extra = el("option", { value: current, text: current });
+    extra.selected = true;
+    select.append(extra);
+  }
+  return editorControl(label, select);
+}
+
+function statusChoices(current) {
+  const keys = globalThis.ItayEdit ? globalThis.ItayEdit.STATUSES.slice() : ["todo", "in_progress", "waiting", "done"];
+  if (current && !keys.includes(current)) keys.unshift(current);
+  return keys.map((key) => ({ value: key, label: statusMeta(key).label }));
+}
+
+function projectChoices(current) {
+  const names = state.data.projects.slice();
+  if (current && !names.includes(current)) names.push(current);
+  return names.map((name) => ({ value: name, label: name }));
+}
+
+function parentChoices(selfId, current) {
+  const options = [{ value: "", label: "No parent" }];
+  const seen = new Set();
+  state.data.tasks.forEach((task) => {
+    if (task.id === selfId) return;
+    seen.add(task.id);
+    options.push({ value: task.id, label: `${task.id} — ${task.title}` });
+  });
+  if (current && current !== selfId && !seen.has(current)) {
+    options.push({ value: current, label: `${current} — missing task` });
+  }
+  return options;
+}
+
+function renderEditor() {
+  const draft = state.editor.draft;
+  const creating = state.editor.mode === "create";
+  const backdrop = el("div", { class: "backdrop", "data-action": "close-panel" });
+  const panel = el("aside", {
+    class: "panel",
+    id: "panel",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": "panel-title",
+    tabindex: "-1",
+    "data-action": "noop",
+  });
+  const head = el("div", { class: "panel-head" });
+  const close = el("button", { type: "button", class: "icon-btn", "data-action": "close-panel", "aria-label": "Close editor" });
+  close.append(icon("close"));
+  head.append(close);
+  const form = el("form", { id: "task-form" });
+  form.append(fieldInput("Title", "title", "text", draft.title));
+  form.append(fieldArea("Notes", "notes", draft.notes));
+  form.append(fieldInput("Due", "due", "date", draft.due));
+  form.append(fieldSelect("Status", "status", statusChoices(draft.status), draft.status));
+  form.append(fieldSelect("Quadrant", "quadrant", [
+    { value: "", label: "Unsorted" },
+    ...QUADRANTS.map((item) => ({ value: item.key, label: `${item.key} ${item.name}` })),
+  ], draft.quadrant));
+  form.append(fieldSelect("Project", "project", projectChoices(draft.project), draft.project));
+  form.append(fieldSelect("Parent", "parent", parentChoices(creating ? "" : state.editor.id, draft.parent), draft.parent));
+  const error = el("p", { id: "editor-error", class: "field-error", role: "alert" });
+  if (state.editor.error) error.textContent = state.editor.error;
+  else error.hidden = true;
+  const actions = el("div", { class: "setup-actions" });
+  actions.append(el("button", {
+    type: "submit",
+    class: "btn btn-primary",
+    text: creating ? "Create task" : "Save task",
+  }));
+  if (!creating) actions.append(el("button", { type: "button", class: "btn", "data-action": "add-subtask", text: "Add subtask" }));
+  form.append(error, actions);
+  panel.append(head, el("h2", { id: "panel-title", class: "panel-title", text: creating ? "New task" : "Edit task" }));
+  if (!creating) {
+    const task = state.data.tasks.find((item) => item.id === state.editor.id);
+    if (task) {
+      const parent = parentChip(task);
+      if (parent) panel.append(panelField("Parent", parent));
+      const subs = subtaskSection(task);
+      if (subs) panel.append(panelField("Subtasks", subs));
+      const chips = linearChips(task);
+      if (chips) panel.append(panelField("Linear", chips));
+    }
+  }
+  panel.append(form, el("p", { class: "panel-foot", text: `Id ${state.editor.id}` }));
+  if (state.demo) panel.append(el("p", { class: "panel-foot", text: "Demo mode saves in this browser only." }));
+  backdrop.append(panel);
+  return backdrop;
+}
+
+function updateEditorChrome() {
+  const error = document.getElementById("editor-error");
+  if (!error || !state.editor) return;
+  error.hidden = !state.editor.error;
+  error.textContent = state.editor.error || "";
+}
+
+function renderConnect() {
+  const host = document.getElementById("dialog-root");
+  if (!host) return;
+  const key = state.connectOpen ? (state.writeToken ? "on" : "off") : "";
+  if (host.dataset.open === key) return;
+  host.dataset.open = key;
+  host.replaceChildren();
+  if (!state.connectOpen) return;
+  const backdrop = el("div", { class: "backdrop dialog-backdrop", "data-action": "close-connect" });
+  const card = el("div", {
+    class: "dialog-card",
+    id: "connect-dialog",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": "connect-title",
+    tabindex: "-1",
+    "data-action": "noop",
+  });
+  const close = el("button", { type: "button", class: "icon-btn dialog-close", "data-action": "close-connect", "aria-label": "Close" });
+  close.append(icon("close"));
+  card.append(close);
+  card.append(el("h2", { id: "connect-title", text: "Connect for editing" }));
+  card.append(el("p", {
+    class: "lede",
+    text: "Writes use a separate fine-grained token. It stays in this browser's local storage and is sent only to api.github.com. It is not saved in this public repository.",
+  }));
+  if (state.writeToken) card.append(el("p", { class: "callout", role: "status", text: "A write token is saved in this browser." }));
+  const steps = el("ol", { class: "steps" });
+  steps.append(step(1, "Create a fine-grained personal access token."));
+  steps.append(step(2, "Set the resource owner to ITAY3PO. Choose Only select repositories and select itay-tasks."));
+  steps.append(step(3, "Set repository permission Contents to Read and write. Metadata read is included automatically."));
+  steps.append(step(4, "Use a 30-day expiration. 90 days is a reasonable maximum on your own computer."));
+  card.append(steps);
+  const form = el("form", { id: "write-token-form" });
+  const input = el("input", {
+    id: "write-token",
+    name: "token",
+    type: "password",
+    autocomplete: "off",
+    spellcheck: "false",
+    autocapitalize: "off",
+    placeholder: "github_pat_…",
+    "aria-label": "Write token",
+  });
+  const error = el("p", { id: "write-token-error", class: "field-error", role: "alert", hidden: "hidden" });
+  const actions = el("div", { class: "setup-actions" });
+  actions.append(el("button", {
+    type: "submit",
+    class: "btn btn-primary",
+    text: state.writeToken ? "Replace token" : "Save token",
+  }));
+  if (state.writeToken) actions.append(el("button", { type: "button", class: "btn", "data-action": "disconnect", text: "Disconnect" }));
+  actions.append(el("button", { type: "button", class: "btn btn-ghost", "data-action": "close-connect", text: "Close" }));
+  form.append(input, error, actions);
+  card.append(form);
+  backdrop.append(card);
+  host.append(backdrop);
+  window.setTimeout(() => document.getElementById("write-token")?.focus(), 0);
+}
+
+function syncSaveStatus() {
+  const node = document.getElementById("save-status");
+  if (!node) return;
+  const status = state.save.status || "idle";
+  const message = scrubSecret(state.save.message || "");
+  node.className = `save-status is-${status}`;
+  node.hidden = status === "idle" || !message;
+  const signature = `${status}:${message}`;
+  if (node.dataset.msg === signature) return;
+  node.dataset.msg = signature;
+  node.replaceChildren();
+  if (!message) return;
+  node.append(document.createTextNode(message));
+  if (status === "failed") {
+    node.append(el("button", { type: "button", class: "text-btn", "data-action": "dismiss-save", text: "Dismiss" }));
+  }
+}
+
+function setSaveStatus(status, message) {
+  state.save = { status, message: message || "" };
+  syncSaveStatus();
+  const live = document.getElementById("live");
+  if (live && message) live.textContent = scrubSecret(message);
+}
+
+function readEditorDraft() {
+  const form = document.getElementById("task-form");
+  if (!form || !state.editor) return state.editor ? { ...state.editor.draft } : null;
+  const draft = { ...state.editor.draft };
+  form.querySelectorAll("[data-field]").forEach((node) => {
+    draft[node.dataset.field] = node.value;
+  });
+  return draft;
+}
+
+function dismissAgenda() {
+  if (!state.agendaOpen) return;
+  state.agendaOpen = false;
+  const host = document.getElementById("agenda-root");
+  if (host) {
+    delete host.dataset.open;
+    host.replaceChildren();
+  }
+}
+
+function startEdit(id) {
+  const task = state.data && state.data.tasks.find((item) => item.id === id);
+  if (!task) return;
+  dismissAgenda();
+  state.openTaskId = id;
+  state.returnFocusId = id;
+  state.editor = { mode: "edit", id, draft: draftFromTask(task), error: "" };
+  state.moveMenu = null;
+  const host = document.getElementById("panel-root");
+  if (host) delete host.dataset.panelKey;
+  updateBoard();
+  document.getElementById("task-title")?.focus();
+}
+
+function startCreate(parentId) {
+  dismissAgenda();
+  const parent = parentId ? state.data.tasks.find((item) => item.id === parentId) : null;
+  const id = globalThis.ItayEdit.nextTaskId(state.data.tasks);
+  const project = parent && state.data.projects.includes(parent.project)
+    ? parent.project
+    : (state.data.projects[0] || "");
+  state.openTaskId = null;
+  state.editor = {
+    mode: "create",
+    id,
+    draft: {
+      title: "",
+      notes: "",
+      due: "",
+      status: "todo",
+      quadrant: "",
+      project,
+      parent: parent ? parent.id : "",
+    },
+    error: "",
+  };
+  state.moveMenu = null;
+  const host = document.getElementById("panel-root");
+  if (host) delete host.dataset.panelKey;
+  updateBoard();
+  document.getElementById("task-title")?.focus();
+}
+
+function snapshotTask(task) {
+  return { ...task, dueDate: task.dueDate ? new Date(task.dueDate.getTime()) : null };
+}
+
+function denormalizeTask(task, spec) {
+  const dueRaw = task.dueRaw || "";
+  const raw = {
+    id: task.id,
+    title: task.title || "",
+    status: task.status || "",
+    priority: task.priority || "",
+    due: dueRaw || null,
+    project: task.project || "",
+    waiting_on: task.waiting_on ? task.waiting_on : null,
+    source: task.source || "",
+    notes: task.notes || "",
+    created: task.created || "",
+    updated: task.updated || "",
+  };
+  if (task.tldr) raw.tldr = task.tldr;
+  if (task.quadrant) raw.quadrant = task.quadrant;
+  if (task.parent) raw.parent = task.parent;
+  if (task.linear && task.linear.length) {
+    raw.linear = task.linear.map((item) => {
+      const link = { id: item.id };
+      if (item.url) link.url = item.url;
+      return link;
+    });
+  }
+  if (task.scheduled && task.scheduled.start) {
+    raw.scheduled = { start: task.scheduled.start };
+    if (task.scheduled.end) raw.scheduled.end = task.scheduled.end;
+  }
+  if (spec) {
+    (spec.remove || []).forEach((key) => {
+      delete raw[key];
+    });
+    Object.keys(spec.changes || {}).forEach((key) => {
+      if (key === "due") raw.due = spec.changes.due || null;
+      else raw[key] = spec.changes[key];
+    });
+  }
+  return raw;
+}
+
+function documentForValidation(tasks) {
+  const edit = globalThis.ItayEdit;
+  return {
+    updated: state.data.updated || "",
+    projects: state.data.projects.slice(),
+    statuses: state.data.statuses.length ? state.data.statuses.slice() : edit.STATUSES.slice(),
+    priorities: state.data.priorities.length ? state.data.priorities.slice() : edit.PRIORITIES.slice(),
+    tasks,
+  };
+}
+
+function diffDraft(task, draft) {
+  const changes = {};
+  const remove = [];
+  const before = {};
+  if (draft.title !== (task.title || "")) {
+    changes.title = draft.title;
+    before.title = task.title || "";
+  }
+  if ((draft.notes || "") !== (task.notes || "")) {
+    changes.notes = draft.notes || "";
+    before.notes = task.notes || "";
+  }
+  const nextDue = draft.due || null;
+  const prevDue = task.dueRaw || null;
+  if (nextDue !== prevDue) {
+    changes.due = nextDue;
+    before.due = prevDue;
+  }
+  if (draft.status !== task.status) {
+    changes.status = draft.status;
+    before.status = task.status;
+  }
+  if ((draft.quadrant || "") !== (task.quadrant || "")) {
+    before.quadrant = task.quadrant || "";
+    if (draft.quadrant) changes.quadrant = draft.quadrant;
+    else remove.push("quadrant");
+  }
+  if (draft.project !== task.project) {
+    changes.project = draft.project;
+    before.project = task.project;
+  }
+  if ((draft.parent || "") !== (task.parent || "")) {
+    before.parent = task.parent || "";
+    if (draft.parent) changes.parent = draft.parent;
+    else remove.push("parent");
+  }
+  return { changes, remove, before };
+}
+
+function applyLocalChange(task, spec) {
+  const changes = spec.changes || {};
+  const remove = spec.remove || [];
+  if (Object.prototype.hasOwnProperty.call(changes, "title")) task.title = changes.title;
+  if (Object.prototype.hasOwnProperty.call(changes, "notes")) task.notes = changes.notes;
+  if (Object.prototype.hasOwnProperty.call(changes, "due")) {
+    task.dueRaw = changes.due || "";
+    task.dueDate = changes.due ? parseISODate(changes.due) : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, "status")) task.status = changes.status;
+  if (Object.prototype.hasOwnProperty.call(changes, "quadrant")) task.quadrant = changes.quadrant;
+  if (remove.includes("quadrant")) task.quadrant = "";
+  if (Object.prototype.hasOwnProperty.call(changes, "project")) task.project = changes.project;
+  if (Object.prototype.hasOwnProperty.call(changes, "parent")) task.parent = changes.parent;
+  if (remove.includes("parent")) task.parent = "";
+}
+
+function normalizeCreated(raw) {
+  return {
+    id: raw.id,
+    title: raw.title,
+    status: raw.status,
+    priority: raw.priority,
+    dueRaw: raw.due || "",
+    dueDate: raw.due ? parseISODate(raw.due) : null,
+    project: raw.project,
+    waiting_on: "",
+    source: raw.source || "",
+    notes: raw.notes || "",
+    created: raw.created || "",
+    updated: raw.updated || "",
+    tldr: "",
+    linear: [],
+    scheduled: null,
+    quadrant: raw.quadrant || "",
+    parent: raw.parent || "",
+  };
+}
+
+function buildNewTask(draft, id) {
+  const edit = globalThis.ItayEdit;
+  const priorities = state.data.priorities.length ? state.data.priorities : edit.PRIORITIES;
+  const priority = priorities.includes("medium") ? "medium" : priorities[0];
+  const today = todayStamp();
+  const raw = {
+    id,
+    title: String(draft.title || "").trim(),
+    status: draft.status || "todo",
+    priority,
+    due: draft.due || null,
+    project: draft.project,
+    waiting_on: null,
+    source: "board",
+    notes: draft.notes || "",
+    created: today,
+    updated: today,
+  };
+  if (draft.quadrant) raw.quadrant = draft.quadrant;
+  if (draft.parent) raw.parent = draft.parent;
+  return raw;
+}
+
+function fieldMatches(task, key, value) {
+  if (key === "due") return (task.dueRaw || "") === (value || "");
+  if (key === "quadrant") return (task.quadrant || "") === (value || "");
+  if (key === "parent") return (task.parent || "") === (value || "");
+  if (key === "notes") return (task.notes || "") === (value || "");
+  return task[key] === value;
+}
+
+function restoreField(task, key, previous) {
+  if (key === "due") {
+    task.dueRaw = previous.dueRaw;
+    task.dueDate = previous.dueDate ? new Date(previous.dueDate.getTime()) : null;
+    return;
+  }
+  task[key] = previous[key];
+}
+
+function rollbackChange(job) {
+  if (job.createdRef) {
+    const index = state.data.tasks.indexOf(job.createdRef);
+    if (index >= 0) state.data.tasks.splice(index, 1);
+    return;
+  }
+  const task = state.data.tasks.find((item) => item.id === job.id);
+  if (!task || !job.previous) return;
+  Object.keys(job.spec.changes || {}).forEach((key) => {
+    if (fieldMatches(task, key, job.spec.changes[key])) restoreField(task, key, job.previous);
+  });
+  (job.spec.remove || []).forEach((key) => {
+    if (key === "quadrant" && !task.quadrant) task.quadrant = job.previous.quadrant || "";
+    if (key === "parent" && !task.parent) task.parent = job.previous.parent || "";
+  });
+}
+
+function failureText(error) {
+  if (error && (error.kind === "validation" || error.kind === "apply")) {
+    return scrubSecret(error.message || "That change could not be saved.");
+  }
+  const status = error && error.status;
+  if (status === 401 || status === 403) {
+    return "The write token was rejected. Disconnect it and paste a token whose Contents permission is Read and write.";
+  }
+  if (status === 409 || status === 422) {
+    return "GitHub kept the latest tasks.json because the file changed while saving. This edit was put back. Try again.";
+  }
+  if (typeof status === "number") return `GitHub responded with ${status}. This edit was put back.`;
+  return "Couldn't reach GitHub. This edit was put back.";
+}
+
+function enqueueWrite(job) {
+  const run = writeChain.then(job, job);
+  writeChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function performChange(job) {
+  const edit = globalThis.ItayEdit;
+  if (!edit || !state.data) return false;
+  const tasks = state.data.tasks.map((task) => denormalizeTask(task));
+  let focusId = job.id;
+  if (job.create) {
+    tasks.push(job.create);
+    focusId = job.create.id;
+  } else {
+    const index = tasks.findIndex((task) => task.id === job.id);
+    if (index < 0) {
+      setSaveStatus("failed", `Task ${job.id} was not found.`);
+      return false;
+    }
+    tasks[index] = denormalizeTask(state.data.tasks[index], job.spec);
+  }
+  const errors = edit.validateDocument(documentForValidation(tasks), {
+    focusId,
+    creating: Boolean(job.create),
+  });
+  if (errors.length) {
+    if (state.editor) state.editor.error = errors[0];
+    setSaveStatus("failed", errors[0]);
+    updateEditorChrome();
+    return false;
+  }
+
+  let createdRef = null;
+  if (job.create) {
+    createdRef = normalizeCreated(job.create);
+    state.data.tasks.push(createdRef);
+    job.createdRef = createdRef;
+  } else {
+    const task = state.data.tasks.find((item) => item.id === job.id);
+    applyLocalChange(task, job.spec);
+  }
+  state.dataVersion += 1;
+  state.subtaskLinks = null;
+  setSaveStatus("saving", "Saving…");
+  updateBoard();
+
+  if (state.demo) {
+    window.setTimeout(() => {
+      if (state.save.status === "saving") {
+        setSaveStatus("saved", "Saved in this browser. Demo mode does not write to GitHub.");
+      }
+    }, 280);
+    return createdRef ? createdRef.id : true;
+  }
+
+  if (!state.writeToken) {
+    rollbackChange(job);
+    state.dataVersion += 1;
+    state.subtaskLinks = null;
+    setSaveStatus("failed", "Connect for editing to save changes. This edit was put back.");
+    updateBoard();
+    return false;
+  }
+
+  const patch = job.create
+    ? { op: "create", task: job.create }
+    : { op: "update", id: job.id, changes: job.spec.changes, remove: job.spec.remove, before: job.before };
+  const message = edit.formatCommitMessage(patch);
+  try {
+    const result = await enqueueWrite(() => edit.commitWithRetry({
+      readFile: () => fetchTasksFile(state.writeToken),
+      writeFile: (body) => putTasksFile(state.writeToken, body),
+      patch,
+      message,
+    }));
+    if (createdRef && result.id && result.id !== createdRef.id) {
+      createdRef.id = result.id;
+      if (state.editor && state.editor.id === job.create.id) state.editor.id = result.id;
+      state.dataVersion += 1;
+      const host = document.getElementById("panel-root");
+      if (host) delete host.dataset.panelKey;
+      updateBoard();
+    }
+    setSaveStatus("saved", "Saved");
+    window.setTimeout(() => {
+      if (state.save.status === "saved") setSaveStatus("idle", "");
+    }, 2500);
+    return createdRef ? createdRef.id : true;
+  } catch (error) {
+    rollbackChange(job);
+    state.dataVersion += 1;
+    state.subtaskLinks = null;
+    const text = failureText(error);
+    if (state.editor && (state.editor.id === job.id || (job.create && state.editor.id === job.create.id))) {
+      state.editor.error = text;
+    }
+    setSaveStatus("failed", text);
+    updateBoard();
+    return false;
+  }
+}
+
+function commitDrop(taskId, kind, target) {
+  const edit = globalThis.ItayEdit;
+  const task = state.data && state.data.tasks.find((item) => item.id === taskId);
+  if (!edit || !task) return;
+  const spec = edit.patchFromDrop(task, { kind, target, statuses: state.data.statuses });
+  if (!spec || spec.error) {
+    setSaveStatus("failed", (spec && spec.error) || "Couldn't move that task.");
+    updateBoard();
+    return;
+  }
+  if (spec.noop) {
+    updateBoard();
+    return;
+  }
+  const before = {};
+  if (kind === "quadrant") before.quadrant = task.quadrant || "";
+  if (kind === "status") before.status = task.status || "";
+  performChange({ id: task.id, spec, before, previous: snapshotTask(task) });
+}
+
+async function saveEditor() {
+  if (!state.editor || !state.data || !globalThis.ItayEdit) return false;
+  const draft = readEditorDraft();
+  state.editor.draft = draft;
+  if (state.editor.mode === "create") {
+    const raw = buildNewTask(draft, state.editor.id);
+    const createdId = await performChange({ id: raw.id, create: raw });
+    if (!createdId) return false;
+    if (state.editor && state.editor.mode === "create") startEdit(createdId);
+    return true;
+  }
+  const task = state.data.tasks.find((item) => item.id === state.editor.id);
+  if (!task) {
+    setSaveStatus("failed", `Task ${state.editor.id} was not found.`);
+    return false;
+  }
+  const diff = diffDraft(task, draft);
+  if (!Object.keys(diff.changes).length && !diff.remove.length) {
+    setSaveStatus("saved", state.demo ? "Saved in this browser. Demo mode does not write to GitHub." : "Saved");
+    return true;
+  }
+  const ok = await performChange({
+    id: task.id,
+    spec: diff,
+    before: diff.before,
+    previous: snapshotTask(task),
+  });
+  return Boolean(ok);
+}
+
+async function addSubtask() {
+  const parentId = state.editor && state.editor.mode === "edit" ? state.editor.id : state.openTaskId;
+  if (!parentId) return;
+  if (state.editor && state.editor.mode === "edit") {
+    const task = state.data.tasks.find((item) => item.id === parentId);
+    const draft = readEditorDraft();
+    const diff = task && draft ? diffDraft(task, draft) : null;
+    if (diff && (Object.keys(diff.changes).length || diff.remove.length)) {
+      const ok = await saveEditor();
+      if (!ok) return;
+    }
+  }
+  startCreate(parentId);
+}
+
+function saveWriteToken(form) {
+  const token = String(new FormData(form).get("token") || "").replace(/^Bearer\s+/i, "").trim();
+  const error = document.getElementById("write-token-error");
+  if (!token) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = "Paste a token to enable editing.";
+    }
+    return;
+  }
+  form.reset();
+  const saved = storage.set(WRITE_TOKEN_KEY, token);
+  state.writeToken = token;
+  if (!saved) state.storageWarning = "This browser blocked local storage, so the write token lasts only until you close the tab.";
+  state.connectOpen = false;
+  const host = document.getElementById("dialog-root");
+  if (host) delete host.dataset.open;
+  setSaveStatus("saved", "Editing connected on this browser.");
+  if (!state.demo && state.mode !== "board") loadRemote();
+  else updateBoard();
+}
+
+function disconnectWrite() {
+  state.writeToken = "";
+  storage.remove(WRITE_TOKEN_KEY);
+  state.connectOpen = false;
+  state.editor = null;
+  state.moveMenu = null;
+  state.openTaskId = state.demo ? state.openTaskId : null;
+  const dialog = document.getElementById("dialog-root");
+  if (dialog) delete dialog.dataset.open;
+  const panel = document.getElementById("panel-root");
+  if (panel) delete panel.dataset.panelKey;
+  setSaveStatus("idle", "");
+  if (!state.demo && !state.token) {
+    state.data = null;
+    state.openTaskId = null;
+    state.mode = "setup";
+    state.error = null;
+    render();
+    return;
+  }
+  if (state.mode === "board") updateBoard();
+  else if (!state.demo) loadRemote();
+  else render();
+}
+
+function onPointerDown(event) {
+  if (!dragKindForView()) return;
+  if (event.button != null && event.button !== 0) return;
+  const handle = event.target.closest && event.target.closest("[data-drag-handle]");
+  if (!handle) return;
+  const card = handle.closest("[data-task-id]");
+  if (!card) return;
+  drag = {
+    id: card.dataset.taskId,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    kind: handle.dataset.dragHandle || dragKindForView(),
+    card,
+  };
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch {
+    /* the pointer can vanish before capture */
+  }
+}
+
+function scrollWhileDragging(x, y) {
+  const edge = 64;
+  const step = 18;
+  if (y < edge) window.scrollBy(0, -step);
+  else if (y > window.innerHeight - edge) window.scrollBy(0, step);
+  const scroller = document.querySelector(".kanban");
+  if (!scroller) return;
+  const rect = scroller.getBoundingClientRect();
+  if (y < rect.top || y > rect.bottom) return;
+  if (x < rect.left + edge) scroller.scrollLeft -= step;
+  else if (x > rect.right - edge) scroller.scrollLeft += step;
+}
+
+function zoneAt(x, y) {
+  if (!drag) return null;
+  const node = document.elementFromPoint(x, y);
+  if (!node || !node.closest) return null;
+  const zone = node.closest("[data-drop-zone]");
+  if (!zone || zone.dataset.dropZone !== drag.kind) return null;
+  return zone;
+}
+
+function onPointerMove(event) {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+  if (!drag.active) {
+    if (distance < 6) return;
+    drag.active = true;
+    suppressClick = true;
+    document.body.classList.add("is-dragging");
+    drag.card.classList.add("is-dragging");
+    const task = state.data && state.data.tasks.find((item) => item.id === drag.id);
+    const ghost = el("div", { id: "drag-ghost", class: "drag-ghost", dir: "auto" });
+    ghost.textContent = task ? task.title : drag.id;
+    document.body.append(ghost);
+    drag.ghost = ghost;
+  }
+  if (event.cancelable) event.preventDefault();
+  scrollWhileDragging(event.clientX, event.clientY);
+  if (drag.ghost) {
+    drag.ghost.style.left = `${event.clientX}px`;
+    drag.ghost.style.top = `${event.clientY}px`;
+  }
+  const zone = zoneAt(event.clientX, event.clientY);
+  document.querySelectorAll(".is-drop-target").forEach((node) => {
+    if (node !== zone) node.classList.remove("is-drop-target");
+  });
+  if (zone) zone.classList.add("is-drop-target");
+  drag.zone = zone;
+}
+
+function endDrag(event) {
+  if (!drag || (event && event.pointerId != null && event.pointerId !== drag.pointerId)) return;
+  const current = drag;
+  drag = null;
+  document.body.classList.remove("is-dragging");
+  if (current.card) current.card.classList.remove("is-dragging");
+  if (current.ghost) current.ghost.remove();
+  document.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
+  if (current.active && current.zone) commitDrop(current.id, current.kind, current.zone.dataset.dropValue);
+  if (current.active) window.setTimeout(() => { suppressClick = false; }, 0);
 }
 
 function init() {
@@ -2535,14 +3757,24 @@ function init() {
   app.addEventListener("change", onChange);
   app.addEventListener("submit", onSubmit);
   document.addEventListener("keydown", onKeydown);
+  document.addEventListener("pointerdown", onPointerDown);
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", endDrag);
+  document.addEventListener("pointercancel", endDrag);
   document.addEventListener("click", (event) => {
+    if (state.moveMenu && moveMenuArmed) {
+      if (!event.target.closest("[data-move-menu]") && !event.target.closest("[data-action='toggle-move']")) {
+        state.moveMenu = null;
+        if (state.mode === "board") updateBoard();
+      }
+    }
     if (!state.projectMenuOpen) return;
     if (event.target.closest("#project-menu") || event.target.closest("#project-btn")) return;
     state.projectMenuOpen = false;
     renderProjectMenu();
   });
   if (state.demo) loadDemo();
-  else if (state.token) loadRemote();
+  else if (state.token || state.writeToken) loadRemote();
   else {
     state.mode = "setup";
     render();
