@@ -403,6 +403,7 @@ function normalize(data) {
       linear: normalizeLinear(raw.linear),
       scheduled: normalizeScheduled(raw.scheduled),
       quadrant: normalizeQuadrant(raw.quadrant),
+      parent: asText(raw.parent),
     });
   });
   return {
@@ -762,16 +763,47 @@ function groupOrder() {
   return [...known, ...extra];
 }
 
+function boardLinks() {
+  const empty = { parentOf: {}, children: {}, progress: {} };
+  const logic = globalThis.ItayBoard;
+  if (!state.data || !logic || typeof logic.subtaskLinks !== "function") return empty;
+  if (state.subtaskLinks && state.subtaskLinksVersion === state.dataVersion) return state.subtaskLinks;
+  state.subtaskLinks = logic.subtaskLinks(state.data.tasks);
+  state.subtaskLinksVersion = state.dataVersion;
+  return state.subtaskLinks;
+}
+
+function linkedParent(task) {
+  if (!task || !state.data) return null;
+  const parentId = boardLinks().parentOf[task.id];
+  if (!parentId) return null;
+  return state.data.tasks.find((item) => item.id === parentId) || null;
+}
+
 function grouped() {
-  const buckets = new Map();
-  groupOrder().forEach((key) => buckets.set(key, []));
-  state.data.tasks.filter(matchesFilter).forEach((task) => {
-    const key = currentGroupBy() === "project" ? task.project : task.status;
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(task);
+  const visible = state.data.tasks.filter(matchesFilter);
+  const logic = globalThis.ItayBoard;
+  const groupOf = (task) => (currentGroupBy() === "project" ? task.project : task.status);
+  if (!logic || typeof logic.groupNested !== "function") {
+    const buckets = new Map();
+    groupOrder().forEach((key) => buckets.set(key, []));
+    visible.forEach((task) => {
+      const key = groupOf(task);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(task);
+    });
+    buckets.forEach((list) => list.sort(compareTasks));
+    return [...buckets.entries()]
+      .filter(([, list]) => list.length)
+      .map(([key, list]) => [key, list.map((task) => ({ task, depth: 0 }))]);
+  }
+  return logic.groupNested({
+    tasks: state.data.tasks,
+    visible,
+    groupOf,
+    groupOrder: groupOrder(),
+    compare: compareTasks,
   });
-  buckets.forEach((list) => list.sort(compareTasks));
-  return [...buckets.entries()].filter(([, list]) => list.length);
 }
 
 function summarize(tasks) {
@@ -1003,20 +1035,95 @@ function linearChips(task) {
   return row;
 }
 
-function taskCell(task) {
-  const td = el("td", { class: "col-task" });
+function progressChip(task) {
+  const progress = boardLinks().progress[task.id];
+  if (!progress || !progress.total) return null;
+  const logic = globalThis.ItayBoard;
+  const label = logic && typeof logic.formatSubtaskProgress === "function"
+    ? logic.formatSubtaskProgress(progress)
+    : `${progress.done}/${progress.total}`;
+  return el("span", {
+    class: "subtask-progress",
+    text: label,
+    title: `${progress.done} of ${progress.total} subtasks done`,
+  });
+}
+
+function doneCheck(task) {
+  const done = task.status === "done";
+  const meta = statusMeta(task.status);
+  return el("span", {
+    class: done ? "done-check is-checked" : "done-check",
+    role: "img",
+    "aria-label": done ? "Done" : meta.label,
+    title: done ? "Done" : meta.label,
+  });
+}
+
+function statusWithCheck(task, nested) {
+  if (!nested) return statusPill(task.status);
+  const wrap = el("span", { class: "status-with-check" });
+  wrap.append(doneCheck(task), statusPill(task.status));
+  return wrap;
+}
+
+function parentChip(task) {
+  const parent = linkedParent(task);
+  if (!parent) return null;
+  const chip = el("button", {
+    type: "button",
+    class: "parent-chip",
+    "data-action": "open-task",
+    "data-id": parent.id,
+    title: `Parent ${parent.id}`,
+    "aria-label": `Open parent ${parent.title}`,
+  });
+  chip.append(el("span", { class: "parent-chip-kicker", text: "Parent" }));
+  chip.append(el("span", { class: "parent-chip-title", dir: "auto", text: parent.title }));
+  return chip;
+}
+
+function relationChips(task) {
+  const parent = parentChip(task);
+  const linear = linearChips(task);
+  if (!parent && !linear) return null;
+  if (!parent) return linear;
+  if (!linear) {
+    const row = el("div", { class: "linear-row" });
+    row.append(parent);
+    return row;
+  }
+  linear.prepend(parent);
+  return linear;
+}
+
+function titleHeading(task, depth) {
   const row = el("div", { class: "title-row" });
+  if (depth > 0) row.append(el("span", { class: "subtask-mark", "aria-hidden": "true", text: "↳" }));
   row.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  const progress = progressChip(task);
+  if (progress) row.append(progress);
+  return row;
+}
+
+function taskCell(task, depth) {
+  const td = el("td", { class: "col-task" });
+  const nest = el("div", { class: depth ? "nest" : "" });
+  if (depth) nest.style.setProperty("--nest", String(depth));
+  const row = titleHeading(task, depth);
   if (task.notes) row.append(el("span", { class: "notes-flag", text: "Notes" }));
-  td.append(row);
+  nest.append(row);
   const sub = task.source || task.notes;
-  if (sub) td.append(el("div", { class: "task-sub", dir: "auto", text: sub }));
-  const chips = linearChips(task);
-  if (chips) td.append(chips);
+  if (sub) nest.append(el("div", { class: "task-sub", dir: "auto", text: sub }));
+  const chips = relationChips(task);
+  if (chips) nest.append(chips);
+  td.append(nest);
   return td;
 }
 
-function renderRow(task) {
+function renderRow(task, depth) {
+  const nest = depth || 0;
+  const parent = linkedParent(task);
   const tr = el("tr", {
     class: state.openTaskId === task.id ? "is-open" : "",
     tabindex: "0",
@@ -1024,13 +1131,19 @@ function renderRow(task) {
     "data-action": "open-task",
     "data-id": task.id,
     "data-task-id": task.id,
-    "aria-label": `Open ${task.title}`,
+    "aria-label": parent ? `Open subtask ${task.title}, parent ${parent.title}` : `Open ${task.title}`,
   });
+  if (nest > 0) {
+    tr.classList.add("is-subtask");
+    tr.style.setProperty("--nest", String(nest));
+    tr.dataset.depth = String(nest);
+  }
+  if (parent) tr.dataset.parentId = parent.id;
   setBar(tr, statusMeta(task.status).bar);
   tr.append(
-    taskCell(task),
+    taskCell(task, nest),
     cell("Project", projectTag(task.project), "col-project"),
-    cell("Status", statusPill(task.status), "col-status"),
+    cell("Status", statusWithCheck(task, nest > 0), "col-status"),
     cell("Priority", priorityPill(task.priority), "col-priority"),
     cell("Quadrant", quadrantBadge(task), "col-quadrant"),
     cell("Due", dueNode(task), "col-due"),
@@ -1039,7 +1152,7 @@ function renderRow(task) {
   return tr;
 }
 
-function renderGroupTable(tasks) {
+function renderGroupTable(rows) {
   const table = el("table", { class: "task-table" });
   const head = el("tr");
   TABLE_COLUMNS.forEach((column) => {
@@ -1063,12 +1176,12 @@ function renderGroupTable(tasks) {
   const thead = el("thead");
   thead.append(head);
   const tbody = el("tbody");
-  tasks.forEach((task) => tbody.append(renderRow(task)));
+  rows.forEach(({ task, depth }) => tbody.append(renderRow(task, depth)));
   table.append(thead, tbody);
   return table;
 }
 
-function renderGroup(key, tasks) {
+function renderGroup(key, rows) {
   const meta = groupMeta(key);
   const collapsed = state.collapsed.has(key);
   const section = el("section", {
@@ -1085,17 +1198,25 @@ function renderGroup(key, tasks) {
   const chevron = icon("chevron");
   chevron.classList.add("chevron");
   const name = el("span", { class: "group-name", dir: "auto", text: meta.label });
-  const count = el("span", { class: "count", text: String(tasks.length) });
+  const count = el("span", { class: "count", text: String(rows.length) });
   count.style.background = safeHex(meta.bar);
   count.style.color = pillFg(meta.bar);
   header.append(chevron, name, count);
   section.append(header);
-  if (!collapsed) section.append(renderGroupTable(tasks));
+  if (!collapsed) section.append(renderGroupTable(rows));
   return section;
 }
 
-function renderCard(task) {
+function renderCard(task, depth) {
+  const nest = depth || 0;
+  const parent = linkedParent(task);
   const card = el("div", { class: `card${state.openTaskId === task.id ? " is-open" : ""}` });
+  if (nest > 0) {
+    card.classList.add("is-subtask");
+    card.style.setProperty("--nest", String(nest));
+    card.dataset.depth = String(nest);
+  }
+  if (parent) card.dataset.parentId = parent.id;
   setBar(card, statusMeta(task.status).bar);
   const button = el("button", {
     type: "button",
@@ -1103,11 +1224,13 @@ function renderCard(task) {
     "data-action": "open-task",
     "data-id": task.id,
     "data-task-id": task.id,
+    "aria-label": parent ? `Open subtask ${task.title}, parent ${parent.title}` : `Open ${task.title}`,
   });
-  button.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  const heading = titleHeading(task, nest);
+  button.append(heading);
   const tags = el("div", { class: "card-tags" });
   if (currentGroupBy() !== "project") tags.append(projectTag(task.project));
-  if (currentGroupBy() !== "status") tags.append(statusPill(task.status));
+  if (currentGroupBy() !== "status" || nest > 0) tags.append(statusWithCheck(task, nest > 0));
   tags.append(priorityPill(task.priority));
   button.append(tags);
   const meta = el("div", { class: "card-meta" });
@@ -1115,27 +1238,35 @@ function renderCard(task) {
   button.append(meta);
   if (task.waiting_on) button.append(waitChip(task.waiting_on, task.status === "waiting"));
   card.append(button);
-  const chips = linearChips(task);
+  const chips = relationChips(task);
   if (chips) card.append(chips);
   return card;
 }
 
-function renderManagerRow(task) {
+function renderManagerRow(task, depth) {
+  const nest = depth || 0;
+  const parent = linkedParent(task);
   const flag = dueClass(task);
   const flagClass = flag === "due-overdue" ? " is-overdue" : flag === "due-today" ? " is-today" : "";
   const row = el("div", {
     class: `manager-row${flagClass}${state.openTaskId === task.id ? " is-open" : ""}`,
   });
+  if (nest > 0) {
+    row.classList.add("is-subtask");
+    row.style.setProperty("--nest", String(nest));
+    row.dataset.depth = String(nest);
+  }
+  if (parent) row.dataset.parentId = parent.id;
   const open = el("button", {
     type: "button",
     class: "manager-open",
     "data-action": "open-task",
     "data-id": task.id,
     "data-task-id": task.id,
-    "aria-label": `Open ${task.title}`,
+    "aria-label": parent ? `Open subtask ${task.title}, parent ${parent.title}` : `Open ${task.title}`,
   });
   const main = el("div", { class: "manager-main" });
-  main.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  main.append(titleHeading(task, nest));
   const summary = taskTldr(task);
   if (summary) main.append(el("p", { class: "tldr", dir: "auto", text: summary }));
   const due = el("div", { class: "manager-due" });
@@ -1143,14 +1274,15 @@ function renderManagerRow(task) {
   open.append(main, due);
   row.append(open);
   const meta = el("div", { class: "manager-meta" });
+  if (nest > 0) meta.append(statusWithCheck(task, true));
   meta.append(quadrantBadge(task), projectTag(task.project), priorityPill(task.priority));
-  const chips = linearChips(task);
+  const chips = relationChips(task);
   if (chips) meta.append(chips);
   row.append(meta);
   return row;
 }
 
-function renderManagerGroup(key, tasks) {
+function renderManagerGroup(key, rows) {
   const meta = groupMeta(key);
   const collapsed = state.collapsed.has(key);
   const section = el("section", { class: `group${collapsed ? " is-collapsed" : ""}` });
@@ -1165,39 +1297,41 @@ function renderManagerGroup(key, tasks) {
   const chevron = icon("chevron");
   chevron.classList.add("chevron");
   const name = el("span", { class: "group-name", dir: "auto", text: meta.label });
-  const count = el("span", { class: "count", text: String(tasks.length) });
+  const count = el("span", { class: "count", text: String(rows.length) });
   count.style.background = safeHex(meta.bar);
   count.style.color = pillFg(meta.bar);
   header.append(chevron, name, count);
   section.append(header);
   if (!collapsed) {
     const list = el("div", { class: "manager-list" });
-    tasks.forEach((item) => list.append(renderManagerRow(item)));
+    rows.forEach(({ task, depth }) => list.append(renderManagerRow(task, depth)));
     section.append(list);
   }
   return section;
 }
 
 function renderMatrixCard(task) {
+  const parent = linkedParent(task);
   const card = el("article", {
     class: `matrix-card${state.openTaskId === task.id ? " is-open" : ""}`,
     "data-task-id": task.id,
   });
+  if (parent) card.dataset.parentId = parent.id;
   const button = el("button", {
     type: "button",
     class: "matrix-open",
     "data-action": "open-task",
     "data-id": task.id,
-    "aria-label": `Open ${task.title}`,
+    "aria-label": parent ? `Open subtask ${task.title}, parent ${parent.title}` : `Open ${task.title}`,
   });
-  button.append(el("div", { class: "task-title", dir: "auto", text: task.title }));
+  button.append(titleHeading(task, 0));
   const summary = taskTldr(task);
   if (summary) button.append(el("p", { class: "tldr", dir: "auto", text: summary }));
   const meta = el("div", { class: "matrix-meta" });
   meta.append(dueNode(task), projectTag(task.project));
   button.append(meta);
   card.append(button);
-  const chips = linearChips(task);
+  const chips = relationChips(task);
   if (chips) card.append(chips);
   return card;
 }
@@ -1253,7 +1387,7 @@ function renderEisenhower(tasks) {
 
 function renderKanban(groups) {
   const board = el("div", { class: "kanban" });
-  groups.forEach(([key, tasks]) => {
+  groups.forEach(([key, rows]) => {
     const meta = groupMeta(key);
     const collapsed = state.collapsed.has(key);
     const col = el("section", { class: `kanban-col${collapsed ? " is-collapsed" : ""}` });
@@ -1266,14 +1400,14 @@ function renderKanban(groups) {
       "aria-expanded": String(!collapsed),
     });
     const name = el("span", { class: "group-name", dir: "auto", text: meta.label });
-    const count = el("span", { class: "count", text: String(tasks.length) });
+    const count = el("span", { class: "count", text: String(rows.length) });
     count.style.background = safeHex(meta.bar);
     count.style.color = pillFg(meta.bar);
     header.append(name, count);
     col.append(header);
     if (!collapsed) {
       const cards = el("div", { class: "kanban-cards" });
-      tasks.forEach((task) => cards.append(renderCard(task)));
+      rows.forEach(({ task, depth }) => cards.append(renderCard(task, depth)));
       col.append(cards);
     }
     board.append(col);
@@ -1356,6 +1490,32 @@ function renderSummary() {
   });
 }
 
+function subtaskSection(task) {
+  const ids = boardLinks().children[task.id] || [];
+  if (!ids.length) return null;
+  const wrap = el("div", { class: "subtask-panel" });
+  const progress = progressChip(task);
+  if (progress) wrap.append(progress);
+  const list = el("ul", { class: "subtask-list" });
+  const children = ids.map((id) => state.data.tasks.find((item) => item.id === id)).filter(Boolean).sort(compareTasks);
+  children.forEach((child) => {
+    const li = el("li");
+    const button = el("button", {
+      type: "button",
+      class: "subtask-link",
+      "data-action": "open-task",
+      "data-id": child.id,
+    });
+    button.append(doneCheck(child));
+    button.append(el("span", { class: "subtask-link-title", dir: "auto", text: child.title }));
+    button.append(statusPill(child.status));
+    li.append(button);
+    list.append(li);
+  });
+  wrap.append(list);
+  return wrap;
+}
+
 function panelField(label, value) {
   const wrap = el("div", { class: "panel-field" });
   wrap.append(el("div", { class: "field-label", text: label }));
@@ -1383,13 +1543,17 @@ function renderAgendaItem(item) {
     body.append(el("div", { class: "agenda-item-title", text: item.title }));
     body.append(el("div", { class: "agenda-kind", text: "Meeting" }));
   } else {
-    body.append(el("div", { class: "agenda-item-title", dir: "auto", text: item.task.title }));
+    const heading = el("div", { class: "title-row" });
+    heading.append(el("div", { class: "agenda-item-title", dir: "auto", text: item.task.title }));
+    const progress = progressChip(item.task);
+    if (progress) heading.append(progress);
+    body.append(heading);
     const summary = taskTldr(item.task);
     if (summary) body.append(el("p", { class: "tldr", dir: "auto", text: summary }));
     const meta = el("div", { class: "agenda-meta" });
     if (item.pinned) meta.append(el("span", { class: "due-tag", text: "Scheduled" }));
     meta.append(quadrantBadge(item.task), priorityPill(item.task.priority), projectTag(item.task.project));
-    const chips = linearChips(item.task);
+    const chips = relationChips(item.task);
     if (chips) meta.append(chips);
     body.append(meta);
   }
@@ -1465,10 +1629,14 @@ function renderAgenda() {
         "data-id": task.id,
       });
       button.append(el("span", { class: "overflow-title", dir: "auto", text: task.title }));
+      const progress = progressChip(task);
+      if (progress) button.append(progress);
       const info = quadrantInfo(task.quadrant);
       const meta = [info ? `${info.key} ${info.name}` : "Unsorted", task.project, priorityMeta(task.priority).label].filter(Boolean).join(" · ");
       if (meta) button.append(el("span", { class: "overflow-meta", text: meta }));
       li.append(button);
+      const parent = parentChip(task);
+      if (parent) li.append(parent);
       items.append(li);
     });
     overflow.append(items);
@@ -1505,6 +1673,10 @@ function renderPanel() {
   panel.append(head, tags, el("h2", { id: "panel-title", class: "panel-title", dir: "auto", text: task.title }));
   const summary = taskTldr(task);
   if (summary) panel.append(el("p", { class: "tldr panel-tldr", dir: "auto", text: summary }));
+  const parent = parentChip(task);
+  if (parent) panel.append(panelField("Parent", parent));
+  const subs = subtaskSection(task);
+  if (subs) panel.append(panelField("Subtasks", subs));
   const chips = linearChips(task);
   if (chips) panel.append(panelField("Linear", chips));
   if (task.scheduled && task.scheduled.start) {

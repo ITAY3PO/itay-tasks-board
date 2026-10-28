@@ -1,6 +1,6 @@
 "use strict";
 
-// Pure scheduling and Linear-link helpers. No DOM, no network.
+// Pure scheduling, Linear-link, and subtask helpers. No DOM, no network.
 // Loaded as a classic script in the browser and as CommonJS in unit tests.
 (function (root, factory) {
   const api = factory();
@@ -384,6 +384,143 @@
     return lines.join("\n");
   }
 
+  function taskId(task) {
+    if (!task || task.id == null) return "";
+    if (typeof task.id === "string") return task.id.trim();
+    if (typeof task.id === "number" || typeof task.id === "boolean") return String(task.id);
+    return "";
+  }
+
+  function rawParentId(task) {
+    if (!task || task.parent == null) return "";
+    if (typeof task.parent === "string") return task.parent.trim();
+    if (typeof task.parent === "number" || typeof task.parent === "boolean") return String(task.parent);
+    return "";
+  }
+
+  // Direct subtasks only. A parent link counts when it names a different task
+  // in the same list. Missing, blank, self, and unknown ids are not links.
+  // If any id repeats while walking up, the chain is a cycle and the link is
+  // dropped so the task stays top-level.
+  function subtaskLinks(tasks) {
+    const list = Array.isArray(tasks) ? tasks.filter((task) => task && typeof task === "object") : [];
+    const byId = new Map();
+    list.forEach((task) => {
+      const id = taskId(task);
+      if (id && !byId.has(id)) byId.set(id, task);
+    });
+
+    function parentIdOf(task) {
+      const id = taskId(task);
+      const start = rawParentId(task);
+      if (!id || !start || start === id || !byId.has(start)) return "";
+      const seen = new Set([id]);
+      let current = start;
+      while (current) {
+        if (seen.has(current)) return "";
+        seen.add(current);
+        const next = rawParentId(byId.get(current));
+        if (!next || next === current || !byId.has(next)) return start;
+        current = next;
+      }
+      return start;
+    }
+
+    const parentOf = {};
+    const children = {};
+    list.forEach((task) => {
+      const id = taskId(task);
+      if (!id || byId.get(id) !== task) return;
+      const parent = parentIdOf(task);
+      if (!parent) return;
+      parentOf[id] = parent;
+      if (!children[parent]) children[parent] = [];
+      children[parent].push(id);
+    });
+
+    const progress = {};
+    Object.keys(children).forEach((parentId) => {
+      const ids = children[parentId];
+      let done = 0;
+      ids.forEach((id) => {
+        const child = byId.get(id);
+        if (child && child.status === "done") done += 1;
+      });
+      progress[parentId] = { done, total: ids.length };
+    });
+
+    return { parentOf, children, progress };
+  }
+
+  function formatSubtaskProgress(progress) {
+    const done = Math.max(0, Math.round(Number(progress && progress.done) || 0));
+    const total = Math.max(0, Math.round(Number(progress && progress.total) || 0));
+    return `${done}/${total}`;
+  }
+
+  // Place visible tasks into groups. A subtask whose parent is also visible
+  // is indented under that parent, in the parent's group, instead of its own.
+  // A subtask whose parent is missing from the visible set stays a root.
+  function groupNested(options) {
+    const source = options || {};
+    const all = Array.isArray(source.tasks) ? source.tasks : [];
+    const shown = Array.isArray(source.visible) ? source.visible : all;
+    const links = subtaskLinks(all.length ? all : shown);
+    const visibleById = new Map();
+    const visibleList = [];
+    shown.forEach((task) => {
+      if (!task || typeof task !== "object") return;
+      const id = taskId(task);
+      if (!id || visibleById.has(id)) return;
+      visibleById.set(id, task);
+      visibleList.push(task);
+    });
+
+    const carried = new Set();
+    visibleList.forEach((task) => {
+      const parent = links.parentOf[taskId(task)];
+      if (parent && visibleById.has(parent)) carried.add(taskId(task));
+    });
+
+    const buckets = new Map();
+    const order = Array.isArray(source.groupOrder) ? source.groupOrder : [];
+    order.forEach((key) => {
+      const bucketKey = key == null ? "" : String(key);
+      if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
+    });
+    const groupOf = typeof source.groupOf === "function" ? source.groupOf : () => "";
+    visibleList.forEach((task) => {
+      const id = taskId(task);
+      if (carried.has(id)) return;
+      const rawKey = groupOf(task);
+      const bucketKey = rawKey == null ? "" : String(rawKey);
+      if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
+      buckets.get(bucketKey).push(task);
+    });
+
+    const compare = typeof source.compare === "function" ? source.compare : () => 0;
+    function expand(task, depth, rows, seen) {
+      const id = taskId(task);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      rows.push({ task, depth });
+      const kids = (links.children[id] || []).map((childId) => visibleById.get(childId)).filter(Boolean);
+      kids.sort(compare);
+      kids.forEach((kid) => expand(kid, depth + 1, rows, seen));
+    }
+
+    const groups = [];
+    buckets.forEach((roots, key) => {
+      if (!roots.length) return;
+      roots.sort(compare);
+      const rows = [];
+      const seen = new Set();
+      roots.forEach((task) => expand(task, 0, rows, seen));
+      if (rows.length) groups.push([key, rows]);
+    });
+    return groups;
+  }
+
   function collectLinearLinks(task) {
     const links = [];
     const seen = new Set();
@@ -418,6 +555,9 @@
     buildAgenda,
     formatAgendaText,
     collectLinearLinks,
+    subtaskLinks,
+    formatSubtaskProgress,
+    groupNested,
     formatZonedDate,
     zonedDateTime,
     quadrantKey,
