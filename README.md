@@ -2,7 +2,7 @@
 
 A read-only, monday.com-style board for one person's tasks. This repository is the **public website only**. It ships HTML, CSS, and JavaScript. It does not contain real tasks.
 
-GitHub Pages serves it from the `main` branch root: `index.html`, `styles.css`, and `app.js`. There is no build step.
+GitHub Pages serves it from the `main` branch root: `index.html`, `styles.css`, `app.js`, and `gantt.js`. There is no build step.
 
 ## Privacy model
 
@@ -118,6 +118,8 @@ Every entry in `busy` is treated as busy, including pending or tentative invites
 Table and Kanban stay as they were. **Manager** is the presentation view: each row is a short title, the due date, and the Eisenhower quadrant as a compact label (`Q1 Do`, `Q2 Schedule`, `Q3 Delegate`, `Q4 Drop`). A task with no quadrant shows its priority instead. Notes, project, status, parent chips, waiting-on, Linear chips, and ids stay hidden in this view. A short title comes from `short_title`, `shortTitle`, `display_title`, or `displayTitle` when one of those is set. Otherwise it is taken from the title, cut at the first ` - `, `:`, `(`, ` — `, or the end of the first sentence, then trimmed to about 50 characters on a word boundary. Hovering the title shows the full title. The parent's `done/total` count stays. Project groups are collapsible, follow the `projects` array, and show a count. Done tasks are hidden until **Hide done** is turned off. The table and Kanban can group by project the same way. The table has a Quadrant column, and every column header sorts its group.
 
 **Eisenhower** is a fourth view. It is a 2×2 grid: Q1 Do, Q2 Schedule, Q3 Delegate, and Q4 Drop. Each cell has a short subtitle, a count, and task cards. Tasks with no quadrant sit in an Unsorted strip under the grid. On a narrow screen the cells stack in that order. The same filters, including quadrant, and **Hide done** apply.
+
+**Gantt** is a read-only timeline, opened from the view switch or `?view=gantt`. One row per open top-level task that has a due date, earliest first. Done tasks and subtasks stay off it. A task whose parent id is missing from the file stays top-level. The label is a project dot plus the same short title Manager uses, cut with an ellipsis, and the full title shows on hover. Chat is `#4466e6`, UMI is `#8b3fd9`, Travel Town is `#1f9d55`, and every other project is gray. Names match without regard to case. Day columns run from the earlier of today and the first due date through the last due date. Each header is the weekday and the day number. Friday and Saturday are dimmed. Today is highlighted, and a vertical line marks that day. Each bar covers that due date only and shows a label like `Nov 4`. A due date before today is red. Status `waiting` is striped. Hovering a bar shows the due date, and `Waiting on …` when `waiting_on` is set. A footer such as `17 with no date` counts open top-level tasks with no due date. The same filters apply. Nothing in this view drags or edits. On a narrow screen the chart scrolls sideways.
 
 On Eisenhower and on Kanban grouped by status, a connected board (or demo mode) can drag a card onto another quadrant or status column. Touch uses the same drag handle as the mouse. **Move** opens the same choices from the keyboard. Other views change status and quadrant from the task form.
 

@@ -33,7 +33,7 @@ const QUADRANTS = [
 
 const QUADRANT_FILTERS = ["Q1", "Q2", "Q3", "Q4", "unsorted"];
 
-const VIEWS = ["table", "kanban", "manager", "eisenhower"];
+const VIEWS = ["table", "kanban", "manager", "eisenhower", "gantt"];
 
 const TABLE_COLUMNS = [
   { key: "title", label: "Task", className: "col-task" },
@@ -1668,12 +1668,107 @@ function emptyState(title, filtered) {
   return box;
 }
 
+function ganttLegend() {
+  const legend = el("span", { class: "gantt-legend" });
+  [["c", "Chat"], ["p", "UMI"], ["g", "Travel Town"]].forEach(([key, name]) => {
+    const item = el("span", { class: "gantt-legend-item" });
+    item.append(el("span", { class: `gdot ${key}`, "aria-hidden": "true" }), document.createTextNode(name));
+    legend.append(item);
+  });
+  return legend;
+}
+
+function renderGanttFoot(model) {
+  const foot = el("p", { class: "gantt-foot" });
+  foot.append(el("span", { class: "gantt-undated", text: model.undatedLabel }));
+  foot.append(document.createTextNode(" · Each bar sits on its due date. Red is overdue. Striped bars are waiting. "));
+  foot.append(ganttLegend());
+  return foot;
+}
+
+function renderGantt() {
+  const wrap = el("div", { class: "gantt-view" });
+  const logic = globalThis.ItayGantt;
+  if (!logic || typeof logic.buildGantt !== "function") {
+    wrap.append(el("p", { class: "gantt-foot", text: "Gantt view failed to load." }));
+    return wrap;
+  }
+  const model = logic.buildGantt(state.data.tasks, {
+    today: todayStamp(),
+    include: matchesFilter,
+  });
+  if (!model.rows.length) {
+    const filtered = filtersActive();
+    wrap.append(emptyState(
+      filtered ? "No dated tasks match these filters." : "No open tasks with a due date.",
+      filtered,
+    ));
+    wrap.append(renderGanttFoot(model));
+    return wrap;
+  }
+  const scroller = el("div", { class: "gantt-scroll" });
+  scroller.tabIndex = 0;
+  scroller.setAttribute("role", "region");
+  scroller.setAttribute("aria-label", "Gantt");
+  const gantt = el("div", { class: "gantt" });
+  gantt.style.setProperty("--gantt-days", String(model.days.length));
+  const header = el("div", { class: "gh" });
+  header.append(el("div", { class: "gl", "aria-hidden": "true" }));
+  const headTrack = el("div", { class: "gt" });
+  const width = 100 / model.days.length;
+  model.days.forEach((day, index) => {
+    const cell = el("div", {
+      class: `gd${day.weekend ? " we" : ""}${day.today ? " td" : ""}`,
+    });
+    cell.style.left = `${(index * width).toFixed(4)}%`;
+    cell.style.width = `${width.toFixed(4)}%`;
+    cell.append(el("b", { text: day.weekday }), el("small", { text: String(day.day) }));
+    headTrack.append(cell);
+  });
+  header.append(headTrack);
+  const body = el("div", { class: "gbody" });
+  if (model.todayFraction != null) {
+    const line = el("div", { class: "gnow", "aria-hidden": "true" });
+    line.style.left = `calc(var(--gl) + (100% - var(--gl)) * ${model.todayFraction})`;
+    body.append(line);
+  }
+  model.rows.forEach((row) => {
+    const line = el("div", { class: "gr" });
+    const label = el("div", { class: "gl" });
+    label.append(
+      el("span", { class: `gdot ${row.colorKey}`, "aria-hidden": "true" }),
+      el("span", { dir: "auto", text: row.shortTitle, title: row.title }),
+    );
+    const track = el("div", { class: "gt" });
+    const bar = el("div", {
+      class: `gb ${row.classes.join(" ")}`,
+      title: row.tooltip,
+      role: "img",
+      "aria-label": `${row.title}. ${row.tooltip}`,
+    });
+    bar.style.left = `${(row.dayIndex * width).toFixed(4)}%`;
+    bar.style.width = `${width.toFixed(4)}%`;
+    bar.append(el("span", { text: row.dateLabel }));
+    track.append(bar);
+    line.append(label, track);
+    body.append(line);
+  });
+  gantt.append(header, body);
+  scroller.append(gantt);
+  wrap.append(scroller, renderGanttFoot(model));
+  return wrap;
+}
+
 function renderBoardList() {
   const host = document.getElementById("board-list");
   if (!host) return;
   host.replaceChildren();
   if (!state.data.tasks.length) {
     host.append(emptyState("No tasks in this file yet.", false));
+    return;
+  }
+  if (state.view === "gantt") {
+    host.append(renderGantt());
     return;
   }
   if (state.view === "eisenhower") {
@@ -2111,7 +2206,7 @@ function updateBoard() {
   syncPressed("view", state.view);
   syncPressed("group", state.groupBy);
   const groupBy = document.getElementById("group-by");
-  if (groupBy) groupBy.hidden = state.view === "manager" || state.view === "eisenhower";
+  if (groupBy) groupBy.hidden = state.view === "manager" || state.view === "eisenhower" || state.view === "gantt";
   const managerLabel = document.getElementById("manager-group-label");
   if (managerLabel) managerLabel.hidden = state.view !== "manager";
   const subtaskTools = document.getElementById("subtask-controls");
@@ -2249,10 +2344,10 @@ function renderBoardShell() {
     el("p", { id: "save-status", class: "save-status", role: "status", hidden: "hidden" }),
   );
   const actions = el("div", { class: "top-actions" });
-  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"], ["eisenhower", "Eisenhower"]], state.view));
+  actions.append(segment("view", [["table", "Table"], ["kanban", "Kanban"], ["manager", "Manager"], ["eisenhower", "Eisenhower"], ["gantt", "Gantt"]], state.view));
   const groupSeg = segment("group", [["status", "Status"], ["project", "Project"]], state.groupBy, "Group by");
   groupSeg.id = "group-by";
-  if (state.view === "manager" || state.view === "eisenhower") groupSeg.hidden = true;
+  if (state.view === "manager" || state.view === "eisenhower" || state.view === "gantt") groupSeg.hidden = true;
   const managerLabel = el("span", { id: "manager-group-label", class: "segment-label", text: "Grouped by project" });
   if (state.view !== "manager") managerLabel.hidden = true;
   actions.append(groupSeg, managerLabel);
