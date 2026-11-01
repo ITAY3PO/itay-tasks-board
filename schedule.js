@@ -1,6 +1,6 @@
 "use strict";
 
-// Pure scheduling, Linear-link, and subtask helpers. No DOM, no network.
+// Pure scheduling, Linear-link, subtask, and short-title helpers. No DOM, no network.
 // Loaded as a classic script in the browser and as CommonJS in unit tests.
 (function (root, factory) {
   const api = factory();
@@ -521,6 +521,173 @@
     return groups;
   }
 
+  const SHORT_TITLE_LIMIT = 50;
+  const SHORT_TITLE_FIELDS = ["short_title", "shortTitle", "display_title", "displayTitle"];
+
+  function collapseWhitespace(value) {
+    return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+  }
+
+  function explicitShortTitle(task) {
+    if (!task || typeof task !== "object") return "";
+    for (let i = 0; i < SHORT_TITLE_FIELDS.length; i += 1) {
+      const value = task[SHORT_TITLE_FIELDS[i]];
+      if (typeof value !== "string") continue;
+      const text = collapseWhitespace(value);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  // Cut before the earliest of " - ", ":", "(", " — ", or just after the
+  // first sentence ending. A hyphen inside a word is not a cut.
+  function earliestCut(text) {
+    let cut = text.length;
+    [" - ", " — ", ":", "("].forEach((marker) => {
+      const index = text.indexOf(marker);
+      if (index > 0 && index < cut) cut = index;
+    });
+    const sentence = /[.!?؟](?=\s|$)/.exec(text);
+    if (sentence && sentence.index > 0) {
+      const end = sentence.index + 1;
+      if (end < cut) cut = end;
+    }
+    return cut;
+  }
+
+  function truncateAtWord(text, limit) {
+    if (text.length <= limit) return text;
+    const window = text.slice(0, limit);
+    const space = window.lastIndexOf(" ");
+    let base = space > 0 ? window.slice(0, space) : window;
+    base = base.replace(/[\s,;:–—\-]+$/u, "").trim();
+    if (!base) base = window.trim() || text.slice(0, limit);
+    return `${base}…`;
+  }
+
+  function deriveShortTitle(title, limit) {
+    const max = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SHORT_TITLE_LIMIT;
+    const text = collapseWhitespace(title);
+    if (!text) return "";
+    const sliced = text.slice(0, earliestCut(text)).trim();
+    return truncateAtWord(sliced || text, max);
+  }
+
+  // Prefer a short or display title when the task has one. Otherwise derive
+  // a meeting-length title from `title`. An explicit field is kept as written.
+  function shortTitle(task, limit) {
+    if (typeof task === "string") return deriveShortTitle(task, limit);
+    const explicit = explicitShortTitle(task);
+    if (explicit) return explicit;
+    return deriveShortTitle(task && task.title, limit);
+  }
+
+  function idList(value) {
+    const source = value instanceof Set ? [...value] : value;
+    if (!Array.isArray(source)) return [];
+    const out = [];
+    const seen = new Set();
+    source.forEach((item) => {
+      if (typeof item !== "string") return;
+      const id = item.trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push(id);
+    });
+    return out;
+  }
+
+  function normalizeSubtaskMemory(stored) {
+    const source = stored && typeof stored === "object" ? stored : {};
+    return {
+      managerExpanded: idList(source.managerExpanded),
+      tableCollapsed: idList(source.tableCollapsed),
+    };
+  }
+
+  function rowDepth(row) {
+    const depth = row && Number(row.depth);
+    return Number.isFinite(depth) && depth > 0 ? Math.floor(depth) : 0;
+  }
+
+  // A row is a parent when the next row in preorder is nested under it.
+  function parentIdsInRows(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const ids = [];
+    const seen = new Set();
+    list.forEach((row, index) => {
+      const id = taskId(row && row.task);
+      if (!id || seen.has(id)) return;
+      const next = list[index + 1];
+      if (!next || rowDepth(next) <= rowDepth(row)) return;
+      seen.add(id);
+      ids.push(id);
+    });
+    return ids;
+  }
+
+  // Hide descendants of collapsed ids. `rows` is a preorder list from groupNested.
+  function collapseSubtaskRows(rows, collapsedIds) {
+    const list = Array.isArray(rows) ? rows : [];
+    const collapsed = new Set(idList(collapsedIds));
+    const visible = [];
+    let cutoff = null;
+    list.forEach((row) => {
+      const depth = rowDepth(row);
+      if (cutoff !== null && depth > cutoff) return;
+      cutoff = null;
+      visible.push(row);
+      const id = taskId(row && row.task);
+      if (id && collapsed.has(id)) cutoff = depth;
+    });
+    return visible;
+  }
+
+  // Manager remembers which parents the user expanded (default collapsed).
+  // Table remembers which parents the user collapsed (default expanded).
+  function collapsedSubtaskIds(options) {
+    const source = options || {};
+    const memory = normalizeSubtaskMemory(source.stored);
+    const parents = idList(source.parentIds);
+    if (source.view === "manager") {
+      const expanded = new Set(memory.managerExpanded);
+      return parents.filter((id) => !expanded.has(id));
+    }
+    if (source.view === "table") {
+      const collapsed = new Set(memory.tableCollapsed);
+      return parents.filter((id) => collapsed.has(id));
+    }
+    return [];
+  }
+
+  function updateSubtaskCollapse(options) {
+    const source = options || {};
+    const view = source.view === "manager" || source.view === "table" ? source.view : "";
+    const memory = normalizeSubtaskMemory(source.stored);
+    const parents = idList(source.parentIds);
+    const parentSet = new Set(parents);
+    const action = source.action;
+    const id = typeof source.taskId === "string" ? source.taskId.trim() : "";
+
+    function toggle(list, addOnlyIfParent) {
+      if (!id) return list;
+      if (list.includes(id)) return list.filter((item) => item !== id);
+      if (addOnlyIfParent && !parentSet.has(id)) return list;
+      return idList(list.concat(id));
+    }
+
+    if (view === "manager") {
+      if (action === "expand-all") memory.managerExpanded = idList(memory.managerExpanded.concat(parents));
+      else if (action === "collapse-all") memory.managerExpanded = memory.managerExpanded.filter((item) => !parentSet.has(item));
+      else if (action === "toggle") memory.managerExpanded = toggle(memory.managerExpanded, true);
+    } else if (view === "table") {
+      if (action === "expand-all") memory.tableCollapsed = memory.tableCollapsed.filter((item) => !parentSet.has(item));
+      else if (action === "collapse-all") memory.tableCollapsed = idList(memory.tableCollapsed.concat(parents));
+      else if (action === "toggle") memory.tableCollapsed = toggle(memory.tableCollapsed, true);
+    }
+    return memory;
+  }
+
   function collectLinearLinks(task) {
     const links = [];
     const seen = new Set();
@@ -558,6 +725,14 @@
     subtaskLinks,
     formatSubtaskProgress,
     groupNested,
+    shortTitle,
+    deriveShortTitle,
+    explicitShortTitle,
+    normalizeSubtaskMemory,
+    parentIdsInRows,
+    collapseSubtaskRows,
+    collapsedSubtaskIds,
+    updateSubtaskCollapse,
     formatZonedDate,
     zonedDateTime,
     quadrantKey,

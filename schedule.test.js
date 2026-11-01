@@ -12,6 +12,14 @@ const {
   zonedDateTime,
   CALENDAR_NOTE,
   NOT_WORKDAY_NOTE,
+  shortTitle,
+  deriveShortTitle,
+  explicitShortTitle,
+  normalizeSubtaskMemory,
+  parentIdsInRows,
+  collapseSubtaskRows,
+  collapsedSubtaskIds,
+  updateSubtaskCollapse,
 } = require("./schedule.js");
 
 const TZ = "Asia/Jerusalem";
@@ -709,6 +717,135 @@ test("demo tasks parent t072–t083 on t071", () => {
   const orphan = demo.tasks.find((item) => item.id === "d23");
   assert.equal(orphan.parent, "t000");
   assert.equal(links.parentOf.d23, undefined);
+});
+
+test("shortTitle uses a short or display title and otherwise derives one", () => {
+  assert.equal(explicitShortTitle({ title: "Cut: here" }), "");
+  assert.equal(shortTitle({ title: "Long title: with extra", short_title: "Brief" }), "Brief");
+  assert.equal(shortTitle({ title: "Long title: with extra", shortTitle: "Camel" }), "Camel");
+  assert.equal(shortTitle({ title: "Long title: with extra", display_title: "Shown" }), "Shown");
+  assert.equal(shortTitle({ title: "Long title: with extra", displayTitle: "Display" }), "Display");
+  assert.equal(shortTitle({ title: "Ignored", short_title: "  Keep   me  " }), "Keep me");
+  assert.equal(shortTitle({ title: "Cut: here", short_title: "Keep: the colon and the rest of a long label" }), "Keep: the colon and the rest of a long label");
+  assert.equal(shortTitle({ title: "Cut: here", short_title: "   ", display_title: "Fallback" }), "Fallback");
+  assert.equal(shortTitle({ title: "Cut: here", tldr: "Not the title", notes: "Not the title either." }), "Cut");
+  assert.equal(shortTitle({ title: "Cut: here", short_title: 12 }), "Cut");
+});
+
+test("deriveShortTitle cuts at the earliest delimiter or sentence end", () => {
+  assert.equal(deriveShortTitle("Ship the banner"), "Ship the banner");
+  assert.equal(deriveShortTitle("  Ship   the   banner  "), "Ship the banner");
+  assert.equal(deriveShortTitle("Ship the banner - extra detail"), "Ship the banner");
+  assert.equal(deriveShortTitle("Ship the banner — extra detail"), "Ship the banner");
+  assert.equal(deriveShortTitle("Ship the banner: extra"), "Ship the banner");
+  assert.equal(deriveShortTitle("Ship the banner (draft)"), "Ship the banner");
+  assert.equal(deriveShortTitle("Ship the banner. Then keep going"), "Ship the banner.");
+  assert.equal(deriveShortTitle("Really? Then more text"), "Really?");
+  assert.equal(deriveShortTitle("Stop! Now more text"), "Stop!");
+  assert.equal(deriveShortTitle("Earlier: cut - not this (or this). Done"), "Earlier");
+  assert.equal(deriveShortTitle("Sentence first. Then: not this"), "Sentence first.");
+  assert.equal(deriveShortTitle("well-known recipe - extra"), "well-known recipe");
+  assert.equal(deriveShortTitle("v1.2 stays intact until: the colon"), "v1.2 stays intact until");
+  assert.equal(deriveShortTitle("סיכום. ואז עוד"), "סיכום.");
+  assert.equal(deriveShortTitle(""), "");
+  assert.equal(deriveShortTitle("   "), "");
+  assert.equal(deriveShortTitle(": leading colon stays"), ": leading colon stays");
+  assert.equal(shortTitle("Ship the banner - extra"), "Ship the banner");
+});
+
+test("deriveShortTitle trims to about 50 characters on a word boundary", () => {
+  const alphabetize = "Alphabetize the sticky notes by color, then photograph the gradient for the fictional archive";
+  assert.equal(deriveShortTitle(alphabetize), "Alphabetize the sticky notes by color, then…");
+  assert.ok(deriveShortTitle(alphabetize).length < alphabetize.length);
+  assert.equal(deriveShortTitle(alphabetize).endsWith("…"), true);
+
+  const exact = `${"word ".repeat(9)}word`;
+  assert.equal(exact.length, 49);
+  assert.equal(deriveShortTitle(exact), exact);
+
+  const fifty = "word ".repeat(10).trim();
+  assert.equal(fifty.length, 49);
+  const atLimit = `${fifty}!`;
+  assert.equal(atLimit.length, 50);
+  assert.equal(deriveShortTitle(atLimit), atLimit);
+
+  const longWord = "SupercalifragilisticexpialidociousSupercalifragilistic";
+  assert.equal(longWord.length > 50, true);
+  assert.equal(deriveShortTitle(longWord), `${longWord.slice(0, 50)}…`);
+
+  const sentence = "This sentence keeps going past the fifty character limit before it stops.";
+  const derived = deriveShortTitle(sentence);
+  assert.equal(derived.endsWith("…"), true);
+  assert.ok(derived.replace(/…$/, "").length <= 50);
+  assert.equal(derived.includes("  "), false);
+
+  const cutThenTruncate = `Note: ${"word ".repeat(20)}`;
+  assert.equal(deriveShortTitle(cutThenTruncate), "Note");
+});
+
+test("collapsing a parent hides its descendants and leaves the rest", () => {
+  const rows = [
+    { task: { id: "p" }, depth: 0 },
+    { task: { id: "c1" }, depth: 1 },
+    { task: { id: "g" }, depth: 2 },
+    { task: { id: "c2" }, depth: 1 },
+    { task: { id: "s" }, depth: 0 },
+  ];
+  const ids = (list) => list.map((row) => row.task.id);
+  assert.deepEqual(parentIdsInRows(rows), ["p", "c1"]);
+  assert.deepEqual(ids(collapseSubtaskRows(rows, ["p"])), ["p", "s"]);
+  assert.deepEqual(ids(collapseSubtaskRows(rows, ["c1"])), ["p", "c1", "c2", "s"]);
+  assert.deepEqual(ids(collapseSubtaskRows(rows, [])), ["p", "c1", "g", "c2", "s"]);
+  assert.deepEqual(ids(collapseSubtaskRows(rows, ["s"])), ["p", "c1", "g", "c2", "s"]);
+  assert.equal(rows.length, 5);
+  assert.deepEqual(parentIdsInRows([]), []);
+  assert.deepEqual(collapseSubtaskRows(null, ["p"]), []);
+});
+
+test("subtask collapse defaults to collapsed in manager and expanded in table", () => {
+  const parents = ["p", "q"];
+  const fresh = normalizeSubtaskMemory(null);
+  assert.deepEqual(fresh, { managerExpanded: [], tableCollapsed: [] });
+  assert.deepEqual(normalizeSubtaskMemory({ managerExpanded: [" p ", "p", "", 4, "q"], tableCollapsed: "nope" }), {
+    managerExpanded: ["p", "q"],
+    tableCollapsed: [],
+  });
+  assert.deepEqual(collapsedSubtaskIds({ view: "manager", stored: fresh, parentIds: parents }), ["p", "q"]);
+  assert.deepEqual(collapsedSubtaskIds({ view: "table", stored: fresh, parentIds: parents }), []);
+  assert.deepEqual(collapsedSubtaskIds({ view: "kanban", stored: fresh, parentIds: parents }), []);
+
+  let stored = updateSubtaskCollapse({ view: "manager", stored: fresh, parentIds: parents, action: "toggle", taskId: "p" });
+  assert.deepEqual(stored.managerExpanded, ["p"]);
+  assert.deepEqual(stored.tableCollapsed, []);
+  assert.deepEqual(collapsedSubtaskIds({ view: "manager", stored, parentIds: parents }), ["q"]);
+  assert.deepEqual(collapsedSubtaskIds({ view: "table", stored, parentIds: parents }), []);
+
+  const rows = [
+    { task: { id: "p" }, depth: 0 },
+    { task: { id: "child" }, depth: 1 },
+    { task: { id: "q" }, depth: 0 },
+    { task: { id: "other" }, depth: 1 },
+  ];
+  const collapsed = collapsedSubtaskIds({ view: "manager", stored, parentIds: parentIdsInRows(rows) });
+  assert.deepEqual(collapseSubtaskRows(rows, collapsed).map((row) => row.task.id), ["p", "child", "q"]);
+
+  stored = updateSubtaskCollapse({ view: "manager", stored, parentIds: parents, action: "collapse-all" });
+  assert.deepEqual(collapsedSubtaskIds({ view: "manager", stored, parentIds: parents }), ["p", "q"]);
+  stored = updateSubtaskCollapse({ view: "manager", stored, parentIds: parents, action: "expand-all" });
+  assert.deepEqual(collapsedSubtaskIds({ view: "manager", stored, parentIds: parents }), []);
+
+  stored = updateSubtaskCollapse({ view: "table", stored, parentIds: parents, action: "collapse-all" });
+  assert.deepEqual(collapsedSubtaskIds({ view: "table", stored, parentIds: parents }), ["p", "q"]);
+  assert.deepEqual(collapsedSubtaskIds({ view: "manager", stored, parentIds: parents }), []);
+  stored = updateSubtaskCollapse({ view: "table", stored, parentIds: parents, action: "toggle", taskId: "q" });
+  assert.deepEqual(collapsedSubtaskIds({ view: "table", stored, parentIds: parents }), ["p"]);
+  stored = updateSubtaskCollapse({ view: "table", stored, parentIds: parents, action: "expand-all" });
+  assert.deepEqual(collapsedSubtaskIds({ view: "table", stored, parentIds: parents }), []);
+
+  const ignored = updateSubtaskCollapse({ view: "manager", stored, parentIds: parents, action: "toggle", taskId: "missing" });
+  assert.deepEqual(ignored, stored);
+  const otherView = updateSubtaskCollapse({ view: "eisenhower", stored, parentIds: parents, action: "collapse-all" });
+  assert.deepEqual(otherView, stored);
 });
 
 test("agenda still schedules a subtask as a normal open task", () => {
