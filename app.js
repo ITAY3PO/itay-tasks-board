@@ -80,6 +80,7 @@ const state = {
   view: "table",
   theme: "light",
   collapsed: new Set(["done"]),
+  subtasks: { managerExpanded: [], tableCollapsed: [] },
   openTaskId: null,
   agendaOpen: false,
   agendaText: "",
@@ -410,6 +411,10 @@ function normalize(data) {
       scheduled: normalizeScheduled(raw.scheduled),
       quadrant: normalizeQuadrant(raw.quadrant),
       parent: asText(raw.parent),
+      short_title: asText(raw.short_title),
+      shortTitle: asText(raw.shortTitle),
+      display_title: asText(raw.display_title),
+      displayTitle: asText(raw.displayTitle),
     });
   });
   return {
@@ -690,6 +695,7 @@ function loadPrefs() {
     ? stored.collapsed[activeGroup].filter((key) => typeof key === "string")
     : null;
   state.collapsed = new Set(saved || (activeGroup === "status" ? ["done"] : []));
+  state.subtasks = normalizeSubtaskState(stored.subtasks);
   state.token = storage.get(TOKEN_KEY) || "";
   state.writeToken = storage.get(WRITE_TOKEN_KEY) || "";
 }
@@ -1206,11 +1212,119 @@ function titleHeading(task, depth) {
   return row;
 }
 
-function taskCell(task, depth) {
+function normalizeSubtaskState(stored) {
+  const logic = globalThis.ItayBoard;
+  if (logic && typeof logic.normalizeSubtaskMemory === "function") return logic.normalizeSubtaskMemory(stored);
+  return { managerExpanded: [], tableCollapsed: [] };
+}
+
+function parentIdsForRows(rows) {
+  const logic = globalThis.ItayBoard;
+  if (!logic || typeof logic.parentIdsInRows !== "function") return [];
+  return logic.parentIdsInRows(rows);
+}
+
+function collapsedIdsFor(parentIds) {
+  const logic = globalThis.ItayBoard;
+  if (!logic || typeof logic.collapsedSubtaskIds !== "function") return [];
+  if (state.view !== "manager" && state.view !== "table") return [];
+  return logic.collapsedSubtaskIds({
+    view: state.view,
+    stored: state.subtasks,
+    parentIds,
+  });
+}
+
+function visibleSubtaskRows(rows) {
+  const logic = globalThis.ItayBoard;
+  if (!logic || typeof logic.collapseSubtaskRows !== "function") return rows;
+  if (state.view !== "manager" && state.view !== "table") return rows;
+  return logic.collapseSubtaskRows(rows, collapsedIdsFor(parentIdsForRows(rows)));
+}
+
+function managerShortTitle(task) {
+  const logic = globalThis.ItayBoard;
+  if (logic && typeof logic.shortTitle === "function") return logic.shortTitle(task);
+  return task.title || "";
+}
+
+function managerPriorityNode(task) {
+  if (task.quadrant && quadrantInfo(task.quadrant)) return quadrantBadge(task);
+  if (task.priority) return priorityPill(task.priority);
+  return el("span", { class: "muted", text: "—" });
+}
+
+function subtaskToggleButton(task, collapsed) {
+  const button = el("button", {
+    type: "button",
+    class: `subtask-toggle${collapsed ? " is-collapsed" : ""}`,
+    "data-action": "toggle-subtasks",
+    "data-id": task.id,
+    "aria-expanded": String(!collapsed),
+    "aria-label": `${collapsed ? "Expand" : "Collapse"} subtasks of ${task.title}`,
+  });
+  const chevron = icon("chevron");
+  chevron.classList.add("chevron");
+  button.append(chevron);
+  return button;
+}
+
+function subtaskSlot(task, parentIds, collapsedIds, reserve) {
+  const ids = parentIds || [];
+  if (ids.includes(task.id)) return subtaskToggleButton(task, (collapsedIds || []).includes(task.id));
+  if (reserve || ids.length) return el("span", { class: "subtask-slot", "aria-hidden": "true" });
+  return null;
+}
+
+function currentParentIds() {
+  const ids = [];
+  grouped().forEach(([, rows]) => {
+    parentIdsForRows(rows).forEach((id) => {
+      if (!ids.includes(id)) ids.push(id);
+    });
+  });
+  return ids;
+}
+
+function announce(text) {
+  const live = document.getElementById("live");
+  if (live) live.textContent = text;
+}
+
+function changeSubtasks(action, taskId) {
+  const logic = globalThis.ItayBoard;
+  if (!logic || typeof logic.updateSubtaskCollapse !== "function") return;
+  if (state.view !== "manager" && state.view !== "table") return;
+  const parents = currentParentIds();
+  state.subtasks = logic.updateSubtaskCollapse({
+    view: state.view,
+    stored: state.subtasks,
+    parentIds: parents,
+    action,
+    taskId,
+  });
+  writeUI({ subtasks: state.subtasks });
+  updateBoard();
+  if (taskId) {
+    document.querySelector(`[data-action="toggle-subtasks"][data-id="${cssEscape(taskId)}"]`)?.focus();
+  }
+  if (action === "collapse-all") announce("Subtasks collapsed.");
+  else if (action === "expand-all") announce("Subtasks expanded.");
+  else {
+    const task = state.data && state.data.tasks.find((item) => item.id === taskId);
+    const name = task ? task.title : "task";
+    const collapsed = collapsedIdsFor(parents).includes(taskId);
+    announce(collapsed ? `Subtasks of ${name} collapsed.` : `Subtasks of ${name} expanded.`);
+  }
+}
+
+function taskCell(task, depth, parentIds, collapsedIds) {
   const td = el("td", { class: "col-task" });
   const nest = el("div", { class: depth ? "nest" : "" });
   if (depth) nest.style.setProperty("--nest", String(depth));
   const row = titleHeading(task, depth);
+  const slot = subtaskSlot(task, parentIds, collapsedIds);
+  if (slot) row.prepend(slot);
   if (task.notes) row.append(el("span", { class: "notes-flag", text: "Notes" }));
   nest.append(row);
   const sub = task.source || task.notes;
@@ -1221,7 +1335,7 @@ function taskCell(task, depth) {
   return td;
 }
 
-function renderRow(task, depth) {
+function renderRow(task, depth, parentIds, collapsedIds) {
   const nest = depth || 0;
   const parent = linkedParent(task);
   const tr = el("tr", {
@@ -1241,7 +1355,7 @@ function renderRow(task, depth) {
   if (parent) tr.dataset.parentId = parent.id;
   setBar(tr, statusMeta(task.status).bar);
   tr.append(
-    taskCell(task, nest),
+    taskCell(task, nest, parentIds, collapsedIds),
     cell("Project", projectTag(task.project), "col-project"),
     cell("Status", statusWithCheck(task, nest > 0), "col-status"),
     cell("Priority", priorityPill(task.priority), "col-priority"),
@@ -1276,7 +1390,9 @@ function renderGroupTable(rows) {
   const thead = el("thead");
   thead.append(head);
   const tbody = el("tbody");
-  rows.forEach(({ task, depth }) => tbody.append(renderRow(task, depth)));
+  const parentIds = parentIdsForRows(rows);
+  const collapsedIds = collapsedIdsFor(parentIds);
+  visibleSubtaskRows(rows).forEach(({ task, depth }) => tbody.append(renderRow(task, depth, parentIds, collapsedIds)));
   table.append(thead, tbody);
   return table;
 }
@@ -1345,7 +1461,7 @@ function renderCard(task, depth) {
   return card;
 }
 
-function renderManagerRow(task, depth) {
+function renderManagerRow(task, depth, parentIds, collapsedIds) {
   const nest = depth || 0;
   const parent = linkedParent(task);
   const flag = dueClass(task);
@@ -1359,6 +1475,8 @@ function renderManagerRow(task, depth) {
     row.dataset.depth = String(nest);
   }
   if (parent) row.dataset.parentId = parent.id;
+  const slot = subtaskSlot(task, parentIds, collapsedIds, true);
+  if (slot) row.append(slot);
   const open = el("button", {
     type: "button",
     class: "manager-open",
@@ -1368,19 +1486,23 @@ function renderManagerRow(task, depth) {
     "aria-label": parent ? `Open subtask ${task.title}, parent ${parent.title}` : `Open ${task.title}`,
   });
   const main = el("div", { class: "manager-main" });
-  main.append(titleHeading(task, nest));
-  const summary = taskTldr(task);
-  if (summary) main.append(el("p", { class: "tldr", dir: "auto", text: summary }));
+  const titleRow = el("div", { class: "title-row" });
+  const short = managerShortTitle(task);
+  titleRow.append(el("div", {
+    class: "task-title",
+    dir: "auto",
+    text: short,
+    title: task.title,
+  }));
+  const progress = progressChip(task);
+  if (progress) titleRow.append(progress);
+  main.append(titleRow);
   const due = el("div", { class: "manager-due" });
   due.append(dueNode(task));
-  open.append(main, due);
+  const priority = el("div", { class: "manager-priority" });
+  priority.append(managerPriorityNode(task));
+  open.append(main, due, priority);
   row.append(open);
-  const meta = el("div", { class: "manager-meta" });
-  if (nest > 0) meta.append(statusWithCheck(task, true));
-  meta.append(quadrantBadge(task), projectTag(task.project), priorityPill(task.priority));
-  const chips = relationChips(task);
-  if (chips) meta.append(chips);
-  row.append(meta);
   return row;
 }
 
@@ -1406,7 +1528,9 @@ function renderManagerGroup(key, rows) {
   section.append(header);
   if (!collapsed) {
     const list = el("div", { class: "manager-list" });
-    rows.forEach(({ task, depth }) => list.append(renderManagerRow(task, depth)));
+    const parentIds = parentIdsForRows(rows);
+    const collapsedIds = collapsedIdsFor(parentIds);
+    visibleSubtaskRows(rows).forEach(({ task, depth }) => list.append(renderManagerRow(task, depth, parentIds, collapsedIds)));
     section.append(list);
   }
   return section;
@@ -1990,6 +2114,8 @@ function updateBoard() {
   if (groupBy) groupBy.hidden = state.view === "manager" || state.view === "eisenhower";
   const managerLabel = document.getElementById("manager-group-label");
   if (managerLabel) managerLabel.hidden = state.view !== "manager";
+  const subtaskTools = document.getElementById("subtask-controls");
+  if (subtaskTools) subtaskTools.hidden = state.view !== "manager" && state.view !== "table";
   updateThemeButton();
   renderWarnings();
   renderInlineError();
@@ -2096,7 +2222,19 @@ function renderToolbar() {
   }));
   const clearFilters = el("button", { type: "button", id: "clear-filters", class: "text-btn", "data-action": "clear-filters", text: "Clear filters" });
   if (!filtersActive()) clearFilters.hidden = true;
-  bar.append(clearFilters, el("span", { id: "showing", class: "showing" }));
+  bar.append(clearFilters);
+  const subtaskTools = el("div", {
+    id: "subtask-controls",
+    class: "subtask-controls",
+    role: "group",
+    "aria-label": "Subtasks",
+  });
+  subtaskTools.append(
+    el("button", { type: "button", class: "btn", "data-action": "collapse-subtasks", text: "Collapse all" }),
+    el("button", { type: "button", class: "btn", "data-action": "expand-subtasks", text: "Expand all" }),
+  );
+  if (state.view !== "manager" && state.view !== "table") subtaskTools.hidden = true;
+  bar.append(subtaskTools, el("span", { id: "showing", class: "showing" }));
   return bar;
 }
 
@@ -2604,6 +2742,12 @@ function onClick(event) {
     else state.collapsed.add(key);
     syncUrl();
     updateBoard();
+  } else if (action === "toggle-subtasks") {
+    changeSubtasks("toggle", button.dataset.id);
+  } else if (action === "collapse-subtasks") {
+    changeSubtasks("collapse-all");
+  } else if (action === "expand-subtasks") {
+    changeSubtasks("expand-all");
   } else if (action === "open-task") {
     if (state.agendaOpen) closeAgenda();
     openTask(button.dataset.id);
@@ -2818,10 +2962,15 @@ function onKeydown(event) {
     if (container) return;
   }
   if (event.target.closest && event.target.closest("a")) return;
-  const row = event.target.closest && event.target.closest('[data-action="open-task"]');
-  if (row && (event.key === "Enter" || event.key === " ")) {
+  if (event.key === "Enter" || event.key === " ") {
+    const actionable = event.target.closest && event.target.closest("[data-action]");
+    if (!actionable || actionable.dataset.action !== "open-task") return;
+    if (event.target !== actionable) {
+      const nested = event.target.closest("button, a, input, select, textarea");
+      if (nested && nested !== actionable) return;
+    }
     event.preventDefault();
-    openTask(row.dataset.id);
+    openTask(actionable.dataset.id);
   }
 }
 

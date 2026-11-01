@@ -1281,9 +1281,10 @@ h1.brand-name {
 
 .manager-row {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px 6px 6px;
   border-top: 1px solid var(--border);
   border-left: 4px solid transparent;
 }
@@ -1303,14 +1304,17 @@ h1.brand-name {
 }
 
 .manager-open {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  align-items: center;
+  column-gap: 16px;
+  flex: 1;
+  min-width: 0;
+  width: auto;
   margin: 0;
-  padding: 0;
+  padding: 2px 4px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1318,14 +1322,35 @@ h1.brand-name {
   cursor: pointer;
 }
 
+.manager-open:hover {
+  background: var(--row-hover);
+}
+
 .manager-main {
   min-width: 0;
-  flex: 1;
+}
+
+.manager-main .title-row {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.manager-main .task-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .manager-due {
-  flex: none;
-  padding-top: 2px;
+  padding-top: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.manager-priority {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 7.5rem;
 }
 
 .manager-meta,
@@ -1489,11 +1514,13 @@ h1.brand-name {
 
 @media (max-width: 640px) {
   .manager-open {
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
   }
 
-  .manager-due {
-    width: 100%;
+  .manager-due,
+  .manager-priority {
+    justify-content: flex-start;
   }
 
   .agenda-head {
@@ -1708,6 +1735,49 @@ h1.brand-name {
   border-left: 2px solid #fff;
   border-bottom: 2px solid #fff;
   transform: rotate(-45deg) translate(0.5px, -1px);
+}
+
+.subtask-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subtask-slot,
+.subtask-toggle {
+  flex: none;
+  width: 28px;
+  height: 28px;
+}
+
+.subtask-toggle {
+  display: inline-grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.subtask-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.subtask-toggle .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.subtask-toggle .chevron {
+  transition: transform 0.15s ease;
+}
+
+.subtask-toggle.is-collapsed .chevron {
+  transform: rotate(-90deg);
 }
 
 .subtask-progress {
